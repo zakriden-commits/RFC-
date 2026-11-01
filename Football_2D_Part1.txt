@@ -1,7 +1,15 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.5 (МЕНЮ + МАТЧИ 1×1 И 2×2)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.6 (МЕНЮ + МАТЧИ 1×1 И 2×2)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
+
+  ЧТО ИСПРАВЛЕНО В 1.6:
+  • Боты больше не прилипают к стенам: недоступные точки захода за мячом заменяются
+    боковым выбиванием мяча от борта, а все обычные цели ботов держатся внутри поля
+  • В 2 на 2 только ближайший бот команды идёт в финальную борьбу за мяч;
+    второй открывается/страхует, а не прижимает мяч вместе с партнёром
+  • Анти-застревание теперь работает у любой стены, не только в углах;
+    медленный мяч у борта постепенно выкатывается обратно в игру
 
   ЧТО НОВОГО В 1.5:
   • Чистое поле: название игры осталось только полупрозрачно в центре, без бортов сверху/снизу
@@ -128,6 +136,8 @@ local BALL_R   = 13                      -- радиус мяча
 local PLAYER_KICK_REACH = 16             -- удар только при почти настоящем касании кругов
 local BOT_KICK_REACH = 10                -- бот тоже бьёт только при касании
 local CORNER_CUT = 72                    -- скошенные углы: мяч и фишки не застревают в мёртвых углах
+local BOT_TARGET_MARGIN = PLAYER_R + 22  -- обычные цели ботов: центр фишки не ставится вплотную к борту
+local WALL_BALL_ZONE = PLAYER_R + BALL_R + 22 -- мяч в этой зоне у стены требует особого захода
 local POSTS = {                          -- штанги
 	Vector2.new(0, GOAL_Y1), Vector2.new(0, GOAL_Y2),
 	Vector2.new(FIELD_W, GOAL_Y1), Vector2.new(FIELD_W, GOAL_Y2),
@@ -207,6 +217,8 @@ local botCommitTimer = 0                -- бот доводит начатую 
 local botPressTimer = 4                 -- периодические волны прессинга даже на чужой половине
 local botThinkTimer, botKickCooldown = 0, 0.5
 local ballIdleTimer = 0
+local ballWallTimer = 0                 -- сколько мяч почти стоит вплотную к борту
+local botTargetIsBall = false           -- true только когда главный бот целится прямо в центр мяча
 local botRecoveryTimer = 0
 local botRecoveryPoint = Vector2.new(500, 300)
 local botCornerTimer = 0
@@ -230,6 +242,7 @@ local function newExtraActor(team, startPos, facing)
 		Recovery = 0,
 		RecoveryPoint = startPos,
 		CornerTimer = 0,
+		TargetIsBall = false,
 		StuckTimer = 0,
 		StuckScore = 0,
 		LastPos = startPos,
@@ -338,9 +351,146 @@ local function clampToField(pos, r)
 	return p
 end
 
+-- При ограничении полем убираем только скорость В стену и сохраняем скольжение вдоль неё.
+-- Особенно важно на скошенных углах, где старый покоординатный сброс убивал сразу обе оси.
+local function applyFieldClamp(pos, vel, r)
+	local clamped = clampToField(pos, r)
+	local correction = clamped - pos
+	if correction.Magnitude > 0.0001 then
+		local inward = unit2(correction)
+		local intoWallSpeed = vel:Dot(inward)
+		if intoWallSpeed < 0 then
+			vel = vel - inward * intoWallSpeed
+		end
+	end
+	return clamped, vel
+end
+
 local function isInCornerZone(pos, pad)
 	return (pos.X < pad or pos.X > FIELD_W - pad)
 		and (pos.Y < pad or pos.Y > FIELD_H - pad)
+end
+
+-- Ближайшая стена и направление ВНУТРЬ поля. Это общая защита для всех ботов.
+local function getNearestWall(pos)
+	local left = pos.X
+	local right = FIELD_W - pos.X
+	local top = pos.Y
+	local bottom = FIELD_H - pos.Y
+	local best = left
+	local inward = Vector2.new(1, 0)
+	local tangent = Vector2.new(0, 1)
+	local side = "Left"
+	if right < best then
+		best = right
+		inward = Vector2.new(-1, 0)
+		tangent = Vector2.new(0, 1)
+		side = "Right"
+	end
+	if top < best then
+		best = top
+		inward = Vector2.new(0, 1)
+		tangent = Vector2.new(1, 0)
+		side = "Top"
+	end
+	if bottom < best then
+		best = bottom
+		inward = Vector2.new(0, -1)
+		tangent = Vector2.new(1, 0)
+		side = "Bottom"
+	end
+	return best, inward, tangent, side
+end
+
+local function clampBotTarget(pos)
+	return clampToField(pos, BOT_TARGET_MARGIN)
+end
+
+local function getWallBallInfo(pos)
+	local dist, inward, tangent, side = getNearestWall(pos)
+	local inGoalMouth = (side == "Left" or side == "Right")
+		and pos.Y > GOAL_Y1 + BALL_R and pos.Y < GOAL_Y2 - BALL_R
+	return (dist <= WALL_BALL_ZONE and not inGoalMouth), dist, inward, tangent, side
+end
+
+-- Обычный заход за мяч может оказаться за стенкой. Тогда он физически недостижим:
+-- фишка не может встать по ту сторону мяча, даже если цель потом обрезать clamp-ом.
+local function getReachableApproach(ballPosition, desiredDir)
+	if desiredDir.Magnitude < 0.01 then
+		return false, clampBotTarget(ballPosition)
+	end
+	local raw = ballPosition - desiredDir * (PLAYER_R + BALL_R + 8)
+	local safe = clampBotTarget(raw)
+	if (raw - safe).Magnitude > 10 then
+		return false, safe
+	end
+	local contactDir = unit2(ballPosition - safe)
+	return contactDir:Dot(desiredDir) >= 0.18, safe
+end
+
+-- У стены мяч нельзя выбить строго внутрь с невозможной точки за ним.
+-- Бот заходит сбоку вдоль борта: касание отправляет мяч вдоль стены,
+-- а небольшой компонент в стену сразу отражается обратно в поле.
+local function getWallExtraction(ballPosition, attackDirX, preferredTarget)
+	local isWall, _, inward, rawTangent = getWallBallInfo(ballPosition)
+	if not isWall then
+		return false
+	end
+	local tangent
+	if math.abs(rawTangent.X) > 0.5 then
+		local tx = attackDirX or 1
+		if ballPosition.X < 170 then
+			tx = 1
+		elseif ballPosition.X > FIELD_W - 170 then
+			tx = -1
+		end
+		tangent = Vector2.new(tx, 0)
+	else
+		local ty
+		if preferredTarget and math.abs(preferredTarget.Y - ballPosition.Y) > 45 then
+			ty = (preferredTarget.Y > ballPosition.Y) and 1 or -1
+		else
+			ty = (ballPosition.Y < GOAL_CENTER_Y) and 1 or -1
+		end
+		tangent = Vector2.new(0, ty)
+	end
+	local extractionDir = unit2(tangent + inward * 0.42)
+	local aim = clampToField(ballPosition + tangent * 270 + inward * 145, BALL_R)
+	local approach = clampToField(ballPosition - tangent * 34 + inward * 25, PLAYER_R + 4)
+	return true, approach, aim, extractionDir, tangent, inward
+end
+
+-- Мягкая подушка у борта для обычной навигации ботов: скорость В стену
+-- заранее уменьшается до нуля у безопасной границы. Финальный контакт с мячом у стены разрешён отдельно.
+local function limitBotVelocityAtWall(pos, desired, allowContact)
+	if allowContact or desired.Magnitude < 0.01 then
+		return desired
+	end
+	local wallDist, inward = getNearestWall(pos)
+	if wallDist >= BOT_TARGET_MARGIN + 33 then
+		return desired
+	end
+	local inwardSpeed = desired:Dot(inward) -- отрицательная = движение к стене
+	local allowedInwardSpeed = -math.max(0, wallDist - BOT_TARGET_MARGIN) * 4
+	if inwardSpeed < allowedInwardSpeed then
+		return desired + inward * (allowedInwardSpeed - inwardSpeed)
+	end
+	return desired
+end
+
+local function separateBotTarget(target, avoidPos, minDist)
+	local offset = target - avoidPos
+	local dist = offset.Magnitude
+	if dist >= minDist then
+		return target
+	end
+	local dir
+	if dist > 0.01 then
+		dir = offset / dist
+	else
+		dir = Vector2.new(0, (target.Y < GOAL_CENTER_Y) and 1 or -1)
+	end
+	return clampBotTarget(avoidPos + dir * minDist)
 end
 
 local function create(className, props, parent)
@@ -893,7 +1043,7 @@ makeText(menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1 • v1.5",
+	Text = "ЧАСТЬ 1 • v1.6",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -1934,6 +2084,7 @@ function resetKickoff(kickoffTeam)
 		actor.Recovery = 0
 		actor.RecoveryPoint = pos
 		actor.CornerTimer = 0
+		actor.TargetIsBall = false
 		actor.StuckTimer = 0
 		actor.StuckScore = 0
 		actor.LastPos = pos
@@ -1957,6 +2108,8 @@ function resetKickoff(kickoffTeam)
 	botPressTimer = 4
 	botRecoveryTimer = 0
 	botCornerTimer = 0
+	botTargetIsBall = false
+	ballWallTimer = 0
 	botStuckSampleTimer = 0
 	botStuckScore = 0
 	botLastSamplePos = botPos
@@ -2441,16 +2594,19 @@ local function botStep(dt)
 		if toCenter.Magnitude < 0.01 then
 			toCenter = Vector2.new(1, 0)
 		end
-		botRecoveryPoint = clampToField(fromPos + toCenter * 190, PLAYER_R)
+		local _, wallInward = getNearestWall(fromPos)
+		botRecoveryPoint = clampBotTarget(fromPos + wallInward * 175 + toCenter * 65)
 		botTargetPos = botRecoveryPoint
+		botTargetIsBall = false
 		botCornerTimer = 0
 		botStuckScore = 0
 		botThinkTimer = 0
 	end
 
-	-- Если мяч почти стоит в углу, а бот его подпирает, бот обязан отойти.
+	-- Если мяч почти стоит у ЛЮБОГО борта, а бот его подпирает, бот обязан отойти.
 	local stuckBallDist = (ballPos - botPos).Magnitude
-	if isInCornerZone(ballPos, 140) and ballVel.Magnitude < 55 and stuckBallDist < 145 then
+	local ballAtWall = getWallBallInfo(ballPos)
+	if ballAtWall and ballVel.Magnitude < 70 and stuckBallDist < 125 then
 		botCornerTimer = botCornerTimer + dt
 	else
 		botCornerTimer = math.max(0, botCornerTimer - dt * 2)
@@ -2464,15 +2620,17 @@ local function botStep(dt)
 	if botStuckSampleTimer >= 0.45 then
 		local botMoved = (botPos - botLastSamplePos).Magnitude
 		local ballMoved = (ballPos - botLastBallSamplePos).Magnitude
-		local wantsToMove = (botTargetPos - botPos).Magnitude > 38
-		local cornerBallSlow = isInCornerZone(ballPos, 140) and ballMoved < 11 and stuckBallDist < 145
-		if botRecoveryTimer <= 0 and ((wantsToMove and botMoved < 10) or cornerBallSlow) then
+		local wantsToMove = (botTargetPos - botPos).Magnitude > 18
+		local wallBallSlow = ballAtWall and ballMoved < 11 and stuckBallDist < 145
+		local botNearWall = getNearestWall(botPos) <= PLAYER_R + 10
+		local pressedToWall = botNearWall and wantsToMove and botMoved < 14
+		if botRecoveryTimer <= 0 and ((wantsToMove and botMoved < 12) or wallBallSlow or pressedToWall) then
 			botStuckScore = botStuckScore + 1
 		else
 			botStuckScore = math.max(0, botStuckScore - 1)
 		end
 		if botStuckScore >= 2 then
-			startBotRecovery(cornerBallSlow and ballPos or botPos, 1.15)
+			startBotRecovery(wallBallSlow and ballPos or botPos, 1.25)
 		end
 		botLastSamplePos = botPos
 		botLastBallSamplePos = ballPos
@@ -2491,13 +2649,18 @@ local function botStep(dt)
 
 		local botDist = (predicted - botPos).Magnitude
 		local playerDist = (predicted - playerPos).Magnitude
+		local enemy2Dist = enemy2Actor.Active and (predicted - enemy2Actor.Pos).Magnitude or math.huge
+		local allyDist = allyActor.Active and (predicted - allyActor.Pos).Magnitude or math.huge
 		local botETA = botDist / math.max(d.Speed, 1)
 		local playerETA = playerDist / SETTINGS.PLAYER_SPRINT
 		local canWinRace = botETA <= playerETA + (-0.12 + d.Aggression * 0.55)
 
 		local playerHasBall = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 50
 		local botHasBall = (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH + 28
-		local looseBall = not playerHasBall and not botHasBall
+		local allyHasBall = allyActor.Active and (ballPos - allyActor.Pos).Magnitude <= PLAYER_R + BALL_R + 50
+		local enemy2HasBall = enemy2Actor.Active and (ballPos - enemy2Actor.Pos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH + 28
+		local blueHasBall = playerHasBall or allyHasBall
+		local looseBall = not blueHasBall and not botHasBall and not enemy2HasBall
 		local ballThreat = (ballPos.X > 720 and ballVel.X > 110)
 			or (ballPos.X > 850 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 175)
 
@@ -2524,6 +2687,13 @@ local function botStep(dt)
 			botMode = "Defend"
 		end
 
+		-- Только ближайший красный идёт до конца в мяч. Если Бот-2 заметно ближе,
+		-- главный бот открывается или страхует, а не создаёт давку у борта.
+		if enemy2Actor.Active and not botHasBall and not ballThreat and enemy2Dist + 5 < botDist then
+			botMode = blueHasBall and "Defend" or "Support"
+		end
+		botTargetIsBall = false
+
 		-- Куда бот ХОЧЕТ отправить мяч. Отсюда считается и заход за мяч:
 		-- для физического удара бот встаёт С ПРОТИВОПОЛОЖНОЙ стороны.
 		local attackTarget
@@ -2541,6 +2711,13 @@ local function botStep(dt)
 		end
 		local shotDir = unit2(attackTarget - predicted)
 		local approachPoint = predicted - shotDir * (PLAYER_R + BALL_R + 8)
+		local approachReachable, safeApproachPoint = getReachableApproach(predicted, shotDir)
+		local wallBall, wallApproachPoint = getWallExtraction(predicted, -1, attackTarget)
+		if wallBall and not approachReachable then
+			approachPoint = wallApproachPoint
+		else
+			approachPoint = safeApproachPoint
+		end
 		local contactDir = unit2(predicted - botPos)
 		local alignment = contactDir:Dot(shotDir)
 
@@ -2549,16 +2726,20 @@ local function botStep(dt)
 			-- Поэтому бот не толкает его случайно к своим воротам и реально ведёт атаку влево.
 			if botDist > 92 or alignment < 0.20 then
 				botTargetPos = approachPoint
+				botTargetIsBall = false
 			else
 				botTargetPos = predicted
+				botTargetIsBall = true
 			end
 		else
 			if ballThreat then
 				-- Угроза своим воротам: перехватываем мяч, по возможности со стороны ворот.
 				if botDist > 80 and alignment < 0.05 then
 					botTargetPos = approachPoint
+				botTargetIsBall = false
 				else
 					botTargetPos = predicted
+				botTargetIsBall = true
 				end
 			else
 				-- Редкая настоящая оборона — и та высокой линией, а не стоя в воротах.
@@ -2566,15 +2747,33 @@ local function botStep(dt)
 				local dirToBall = unit2(ballPos - goalPos)
 				local defPos = goalPos + dirToBall * 315
 				botTargetPos = Vector2.new(clamp(defPos.X, 540, 925), clamp(defPos.Y, 85, FIELD_H - 85))
+				botTargetIsBall = false
 			end
+		end
+
+		if wallBall and not approachReachable and botTargetPos == approachPoint then
+			botTargetIsBall = true -- финальная точка бокового касания у стены, не обычная навигационная цель
+		end
+
+		if botMode == "Support" then
+			local supportX = clamp(predicted.X - 215, 150, 735)
+			local openLaneY = (predicted.Y < GOAL_CENTER_Y) and 425 or 175
+			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75, FIELD_H - 75)
+			botTargetPos = Vector2.new(supportX, supportY)
+			if enemy2Actor.Active then
+				botTargetPos = separateBotTarget(botTargetPos, enemy2Actor.Pos, 94)
+			end
+			botTargetPos = separateBotTarget(botTargetPos, ballPos, 108)
+			botTargetIsBall = false
 		end
 	end
 
 	if botRecoveryTimer > 0 then
 		botMode = "Recover"
 		botTargetPos = botRecoveryPoint
+		botTargetIsBall = false
 	end
-	botTargetPos = clampToField(botTargetPos, PLAYER_R)
+	botTargetPos = botTargetIsBall and clampToField(botTargetPos, PLAYER_R) or clampBotTarget(botTargetPos)
 
 	-- Движение бота: тот же физический подход, что у игрока.
 	local toTarget = botTargetPos - botPos
@@ -2592,6 +2791,7 @@ local function botStep(dt)
 	if targetDist > 4 then
 		desired = unit2(toTarget) * speedNow
 	end
+	desired = limitBotVelocityAtWall(botPos, desired, botTargetIsBall)
 	local botAccel = d.Accel or 600
 	if desired.Magnitude < 1 then
 		botAccel = botAccel * 1.15
@@ -2601,11 +2801,7 @@ local function botStep(dt)
 		botVel = Vector2.new(0, 0)
 	end
 	botPos = botPos + botVel * dt
-	local clampedBotPos = clampToField(botPos, PLAYER_R)
-	-- У борта скорость в стену гаснет, а вдоль борта фишка скользит
-	if clampedBotPos.X ~= botPos.X then botVel = Vector2.new(0, botVel.Y) end
-	if clampedBotPos.Y ~= botPos.Y then botVel = Vector2.new(botVel.X, 0) end
-	botPos = clampedBotPos
+	botPos, botVel = applyFieldClamp(botPos, botVel, PLAYER_R)
 
 	-- Решение об ударе
 	if botRecoveryTimer <= 0 and botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
@@ -2630,6 +2826,17 @@ local function botStep(dt)
 			power = 0.50
 		end
 
+		local wallApproachPoint
+		local wallBall, wallApproach, wallAim = getWallExtraction(ballPos, -1, aim)
+		if wallBall then
+			local normalReachable = getReachableApproach(ballPos, unit2(aim - ballPos))
+			if not normalReachable then
+				aim = wallAim
+				power = 0.66
+				wallApproachPoint = wallApproach
+			end
+		end
+
 		-- Физический удар нельзя делать с неправильной стороны:
 		-- если бот оказался не за мячом, он обежит его, а не ударит назад.
 		local desiredDir = unit2(aim - ballPos)
@@ -2639,6 +2846,10 @@ local function botStep(dt)
 		local minAlignment = clamp(0.68 - d.AimError * 0.026, 0.02, 0.52) -- сложный бот ждёт более точный заход за мяч
 		if isInCornerZone(ballPos, 140) then
 			minAlignment = math.max(minAlignment, 0.45)
+		end
+		if wallApproachPoint then
+			-- Для бокового выноса от стены важен компонент вдоль борта; стена вернёт мяч внутрь.
+			minAlignment = math.min(minAlignment, 0.38)
 		end
 
 		if alignmentNow >= minAlignment or (emergency and alignmentNow > -0.35) then
@@ -2650,7 +2861,8 @@ local function botStep(dt)
 				botMode = "Attack"
 			end
 		else
-			botTargetPos = ballPos - desiredDir * (PLAYER_R + BALL_R + 10)
+			botTargetPos = wallApproachPoint or clampBotTarget(ballPos - desiredDir * (PLAYER_R + BALL_R + 10))
+			botTargetIsBall = wallApproachPoint ~= nil
 			botThinkTimer = math.min(botThinkTimer, 0.05)
 		end
 	end
@@ -2693,6 +2905,11 @@ local function chooseExtraActorAim(actor, fromPos)
 	local attackGoalX = isBlue and FIELD_W or 0
 	local teammatePos, teammateVel = getActorTeammate(actor)
 	local nearestOpponent = getNearestOpponentPos(actor, fromPos)
+
+	local wallBall, _, wallAim = getWallExtraction(fromPos, attackDirX)
+	if wallBall then
+		return wallAim, 0.66
+	end
 
 	if isInCornerZone(fromPos, 140) then
 		return Vector2.new((fromPos.X < FIELD_W / 2) and 300 or 700,
@@ -2752,15 +2969,18 @@ local function extraActorStep(actor, dt)
 		if toCenter.Magnitude < 0.01 then
 			toCenter = Vector2.new(attackDirX, 0)
 		end
-		actor.RecoveryPoint = clampToField(fromPos + toCenter * 190, PLAYER_R)
+		local _, wallInward = getNearestWall(fromPos)
+		actor.RecoveryPoint = clampBotTarget(fromPos + wallInward * 175 + toCenter * 65)
 		actor.Target = actor.RecoveryPoint
+		actor.TargetIsBall = false
 		actor.CornerTimer = 0
 		actor.StuckScore = 0
 		actor.Think = 0
 	end
 
 	local distToBallNow = (ballPos - actor.Pos).Magnitude
-	if isInCornerZone(ballPos, 140) and ballVel.Magnitude < 55 and distToBallNow < 145 then
+	local ballAtWall = getWallBallInfo(ballPos)
+	if ballAtWall and ballVel.Magnitude < 70 and distToBallNow < 125 then
 		actor.CornerTimer = actor.CornerTimer + dt
 	else
 		actor.CornerTimer = math.max(0, actor.CornerTimer - dt * 2)
@@ -2773,15 +2993,17 @@ local function extraActorStep(actor, dt)
 	if actor.StuckTimer >= 0.45 then
 		local moved = (actor.Pos - actor.LastPos).Magnitude
 		local ballMoved = (ballPos - actor.LastBallPos).Magnitude
-		local wantsToMove = (actor.Target - actor.Pos).Magnitude > 38
-		local cornerBallSlow = isInCornerZone(ballPos, 140) and ballMoved < 11 and distToBallNow < 145
-		if actor.Recovery <= 0 and ((wantsToMove and moved < 10) or cornerBallSlow) then
+		local wantsToMove = (actor.Target - actor.Pos).Magnitude > 18
+		local wallBallSlow = ballAtWall and ballMoved < 11 and distToBallNow < 145
+		local actorNearWall = getNearestWall(actor.Pos) <= PLAYER_R + 10
+		local pressedToWall = actorNearWall and wantsToMove and moved < 14
+		if actor.Recovery <= 0 and ((wantsToMove and moved < 12) or wallBallSlow or pressedToWall) then
 			actor.StuckScore = actor.StuckScore + 1
 		else
 			actor.StuckScore = math.max(0, actor.StuckScore - 1)
 		end
 		if actor.StuckScore >= 2 then
-			startRecovery(cornerBallSlow and ballPos or actor.Pos)
+			startRecovery(wallBallSlow and ballPos or actor.Pos)
 		end
 		actor.LastPos = actor.Pos
 		actor.LastBallPos = ballPos
@@ -2798,7 +3020,12 @@ local function extraActorStep(actor, dt)
 		local actorDist = (predicted - actor.Pos).Magnitude
 		local teammateDist = (predicted - teammatePos).Magnitude
 		local _, opponentDist = getNearestOpponentPos(actor, ballPos)
-		local actorClosest = actorDist <= teammateDist + 25
+		local actorClosest
+		if actor.Team == "Red" then
+			actorClosest = actorDist + 5 < teammateDist -- у Бота-1 приоритет при почти равной дистанции
+		else
+			actorClosest = actorDist <= teammateDist + 20
+		end
 		local actorHasBall = distToBall <= PLAYER_R + BALL_R + BOT_KICK_REACH + 18
 		local teammateHasBall = (ballPos - teammatePos).Magnitude <= PLAYER_R + BALL_R + 42
 		local opponentHasBall = opponentDist <= PLAYER_R + BALL_R + 42
@@ -2812,26 +3039,36 @@ local function extraActorStep(actor, dt)
 				or (ballPos.X > 830 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 190)
 		end
 
-		if actorHasBall or threatToOwnGoal or ballIdleTimer > 1.2
+		if actorHasBall or (threatToOwnGoal and actorClosest)
+			or (ballIdleTimer > 1.2 and actorClosest)
 			or (actorClosest and (looseBall or opponentHasBall or actor.Commit > 0)) then
 			actor.Mode = "Chase"
 		elseif teammateHasBall then
 			actor.Mode = "Support"
-		elseif opponentHasBall then
+		elseif threatToOwnGoal or opponentHasBall then
 			actor.Mode = "Cover"
 		else
 			actor.Mode = "Support"
 		end
+		actor.TargetIsBall = false
 
 		if actor.Mode == "Chase" then
-			local aim = chooseExtraActorAim(actor, predicted)
-			local shotDir = unit2(aim - predicted)
-			local approachPoint = predicted - shotDir * (PLAYER_R + BALL_R + 8)
-			local alignment = unit2(predicted - actor.Pos):Dot(shotDir)
-			if actorDist > 92 or alignment < 0.20 then
-				actor.Target = approachPoint
+			local wallBall, wallApproachPoint = getWallExtraction(predicted, attackDirX)
+			if wallBall then
+				actor.Target = wallApproachPoint
+				actor.TargetIsBall = true -- финальная точка бокового касания у стены
 			else
-				actor.Target = predicted
+				local aim = chooseExtraActorAim(actor, predicted)
+				local shotDir = unit2(aim - predicted)
+				local _, approachPoint = getReachableApproach(predicted, shotDir)
+				local alignment = unit2(predicted - actor.Pos):Dot(shotDir)
+				if actorDist > 92 or alignment < 0.20 then
+					actor.Target = approachPoint
+					actor.TargetIsBall = false
+				else
+					actor.Target = predicted
+					actor.TargetIsBall = true
+				end
 			end
 		elseif actor.Mode == "Cover" then
 			local ownGoal = Vector2.new(isBlue and 0 or FIELD_W, GOAL_CENTER_Y)
@@ -2851,19 +3088,25 @@ local function extraActorStep(actor, dt)
 			local openLaneY = (ballPos.Y < GOAL_CENTER_Y) and 425 or 175
 			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75, FIELD_H - 75)
 			actor.Target = Vector2.new(supportX, supportY)
+			actor.TargetIsBall = false
 		end
 
-		-- Не толпимся в одной точке со своим партнёром.
-		if (actor.Target - teammatePos).Magnitude < 78 then
-			actor.Target = actor.Target + Vector2.new(0, (actor.Target.Y < GOAL_CENTER_Y) and 95 or -95)
+		-- Не толпимся в одной точке со своим партнёром и не входим вторым в борьбу у мяча.
+		if not actor.TargetIsBall then
+			actor.Target = separateBotTarget(actor.Target, teammatePos, 90)
+		end
+		if actor.Mode ~= "Chase" then
+			actor.Target = separateBotTarget(actor.Target, ballPos, 108)
+			actor.TargetIsBall = false
 		end
 	end
 
 	if actor.Recovery > 0 then
 		actor.Mode = "Recover"
 		actor.Target = actor.RecoveryPoint
+		actor.TargetIsBall = false
 	end
-	actor.Target = clampToField(actor.Target, PLAYER_R)
+	actor.Target = actor.TargetIsBall and clampToField(actor.Target, PLAYER_R) or clampBotTarget(actor.Target)
 
 	local toTarget = actor.Target - actor.Pos
 	local targetDist = toTarget.Magnitude
@@ -2878,6 +3121,7 @@ local function extraActorStep(actor, dt)
 	if targetDist > 4 then
 		desired = unit2(toTarget) * speedNow
 	end
+	desired = limitBotVelocityAtWall(actor.Pos, desired, actor.TargetIsBall)
 	local accel = d.Accel or 600
 	if desired.Magnitude < 1 then
 		accel = accel * 1.15
@@ -2887,14 +3131,16 @@ local function extraActorStep(actor, dt)
 		actor.Vel = Vector2.new(0, 0)
 	end
 	actor.Pos = actor.Pos + actor.Vel * dt
-	local clampedPos = clampToField(actor.Pos, PLAYER_R)
-	if clampedPos.X ~= actor.Pos.X then actor.Vel = Vector2.new(0, actor.Vel.Y) end
-	if clampedPos.Y ~= actor.Pos.Y then actor.Vel = Vector2.new(actor.Vel.X, 0) end
-	actor.Pos = clampedPos
+	actor.Pos, actor.Vel = applyFieldClamp(actor.Pos, actor.Vel, PLAYER_R)
 
 	if actor.Recovery <= 0 and actor.KickCooldown <= 0
 		and (ballPos - actor.Pos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
 		local aim, power = chooseExtraActorAim(actor, ballPos)
+		local wallApproachPoint
+		local wallBall, wallApproach = getWallExtraction(ballPos, attackDirX, aim)
+		if wallBall then
+			wallApproachPoint = wallApproach
+		end
 		local desiredDir = unit2(aim - ballPos)
 		local contactDir = unit2(ballPos - actor.Pos)
 		local alignment = contactDir:Dot(desiredDir)
@@ -2908,6 +3154,9 @@ local function extraActorStep(actor, dt)
 		if isInCornerZone(ballPos, 140) then
 			minAlignment = math.max(minAlignment, 0.45)
 		end
+		if wallApproachPoint then
+			minAlignment = math.min(minAlignment, 0.38)
+		end
 		if alignment >= minAlignment or (emergency and alignment > -0.35) then
 			if kickBallForActor(actor, power) then
 				actor.KickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
@@ -2915,7 +3164,8 @@ local function extraActorStep(actor, dt)
 				actor.Mode = "Chase"
 			end
 		else
-			actor.Target = ballPos - desiredDir * (PLAYER_R + BALL_R + 10)
+			actor.Target = wallApproachPoint or clampBotTarget(ballPos - desiredDir * (PLAYER_R + BALL_R + 10))
+			actor.TargetIsBall = wallApproachPoint ~= nil
 			actor.Think = math.min(actor.Think, 0.05)
 		end
 	end
@@ -2968,11 +3218,7 @@ local function playerStep(dt)
 	end
 
 	playerPos = playerPos + playerVel * dt
-	local clampedPlayerPos = clampToField(playerPos, PLAYER_R)
-	-- У борта скорость в стену гаснет, а вдоль борта фишка скользит
-	if clampedPlayerPos.X ~= playerPos.X then playerVel = Vector2.new(0, playerVel.Y) end
-	if clampedPlayerPos.Y ~= playerPos.Y then playerVel = Vector2.new(playerVel.X, 0) end
-	playerPos = clampedPlayerPos
+	playerPos, playerVel = applyFieldClamp(playerPos, playerVel, PLAYER_R)
 end
 
 -- Фишки не проходят друг сквозь друга (в 2 на 2 проверяются все пары)
@@ -2980,10 +3226,18 @@ local function resolvePair(aPos, aVel, bPos, bVel)
 	local diff = bPos - aPos
 	local dist = diff.Magnitude
 	local minDist = PLAYER_R * 2
-	if dist <= 0.001 or dist >= minDist then
+	if dist >= minDist then
 		return aPos, aVel, bPos, bVel
 	end
-	local n = diff / dist
+	local n
+	if dist <= 0.001 then
+		n = unit2(bVel - aVel)
+		if n.Magnitude < 0.01 then
+			n = Vector2.new(1, 0)
+		end
+	else
+		n = diff / dist
+	end
 	local push = n * ((minDist - dist) / 2)
 	aPos = aPos - push
 	bPos = bPos + push
@@ -2996,6 +3250,7 @@ local function resolvePair(aPos, aVel, bPos, bVel)
 end
 
 local function resolveChipChip()
+	for _ = 1, 2 do
 	playerPos, playerVel, botPos, botVel = resolvePair(playerPos, playerVel, botPos, botVel)
 	if allyActor.Active then
 		playerPos, playerVel, allyActor.Pos, allyActor.Vel =
@@ -3012,6 +3267,7 @@ local function resolveChipChip()
 	if allyActor.Active and enemy2Actor.Active then
 		allyActor.Pos, allyActor.Vel, enemy2Actor.Pos, enemy2Actor.Vel =
 			resolvePair(allyActor.Pos, allyActor.Vel, enemy2Actor.Pos, enemy2Actor.Vel)
+	end
 	end
 end
 
@@ -3078,11 +3334,19 @@ local function ballStep(dt)
 		if allyActor.Active then collideBallWithChip(allyActor.Pos, allyActor.Vel) end
 		if enemy2Actor.Active then collideBallWithChip(enemy2Actor.Pos, enemy2Actor.Vel) end
 
-		-- Углы поля скошены и чуть наклонены внутрь: почти остановившийся мяч
-		-- сам выкатывается из мёртвого угла, а не остаётся там навсегда.
+		-- Борта чуть «наклонены» внутрь для почти остановившегося мяча:
+		-- после короткой паузы он выкатывается от любой стены, а не только из угла.
+		local ballAtWall, wallDist, wallInward = getWallBallInfo(ballPos)
+		if ballAtWall and wallDist <= BALL_R + 9 and ballVel.Magnitude < 105 then
+			ballWallTimer = ballWallTimer + sdt
+		else
+			ballWallTimer = math.max(0, ballWallTimer - sdt * 2)
+		end
 		if isInCornerZone(ballPos, 115) and ballVel.Magnitude < 110 then
 			local inward = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - ballPos)
 			ballVel = ballVel + inward * (230 * sdt)
+		elseif ballWallTimer > 0.55 and ballAtWall then
+			ballVel = ballVel + wallInward * (310 * sdt)
 		end
 
 		ballPos = ballPos + ballVel * sdt
@@ -3564,4 +3828,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.5 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
+print("[ROBALL] Часть 1 v1.6 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
