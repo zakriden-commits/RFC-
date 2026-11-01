@@ -1,7 +1,12 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.6 (МЕНЮ + МАТЧИ 1×1 И 2×2)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.6.1 (МЕНЮ + МАТЧИ 1×1 И 2×2)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
+
+  ЧТО ИСПРАВЛЕНО В 1.6.1:
+  • Убран краш Luau «Out of local registers ... ballStep ... exceeded limit 200»:
+    UI-ссылки, состояние бота и повтора упакованы в таблицы, а одноразовое построение
+    интерфейса вынесено в отдельные do-блоки, освобождающие локальные регистры
 
   ЧТО ИСПРАВЛЕНО В 1.6:
   • Боты больше не прилипают к стенам: недоступные точки захода за мячом заменяются
@@ -211,21 +216,25 @@ local isCharging = false
 local chargePower = 0
 local chargeAimToGoal = false   -- true при ударе с кнопки «УДАР» (телефон) / пробела
 
-local botTargetPos = Vector2.new(800, 300)
-local botMode = "Attack"               -- Attack / Challenge / Defend
-local botCommitTimer = 0                -- бот доводит начатую атаку до конца, а не бросает на полпути
-local botPressTimer = 4                 -- периодические волны прессинга даже на чужой половине
-local botThinkTimer, botKickCooldown = 0, 0.5
-local ballIdleTimer = 0
-local ballWallTimer = 0                 -- сколько мяч почти стоит вплотную к борту
-local botTargetIsBall = false           -- true только когда главный бот целится прямо в центр мяча
-local botRecoveryTimer = 0
-local botRecoveryPoint = Vector2.new(500, 300)
-local botCornerTimer = 0
-local botStuckSampleTimer = 0
-local botStuckScore = 0
-local botLastSamplePos = botPos
-local botLastBallSamplePos = ballPos
+-- Состояние главного бота — одна таблица вместо 16 отдельных top-level local.
+local BotAI = {
+	botTargetPos = Vector2.new(800, 300),
+	botMode = "Attack", -- Attack / Challenge / Defend / Support / Recover
+	botCommitTimer = 0,
+	botPressTimer = 4,
+	botThinkTimer = 0,
+	botKickCooldown = 0.5,
+	ballIdleTimer = 0,
+	ballWallTimer = 0,
+	botTargetIsBall = false,
+	botRecoveryTimer = 0,
+	botRecoveryPoint = Vector2.new(500, 300),
+	botCornerTimer = 0,
+	botStuckSampleTimer = 0,
+	botStuckScore = 0,
+	botLastSamplePos = botPos,
+	botLastBallSamplePos = ballPos,
+}
 
 -- Дополнительные футболисты режима 2 на 2.
 local function newExtraActor(team, startPos, facing)
@@ -256,18 +265,21 @@ local enemy2Actor = newExtraActor("Red", Vector2.new(725, 420), math.pi)
 local extraActors = { allyActor, enemy2Actor }
 
 -- Запись последних секунд для повтора гола
-local replayFrames = {}
-local replayClock = 0
-local replaySampleTimer = 0
-local replayActive = false
-local replayTime = 0
-local replayDuration = SETTINGS.REPLAY_DURATION
-local replaySourceStart = 0
-local replaySourceEnd = 0
-local replayFrameIndex = 1
-local replaySkipRequested = false
+-- Состояние записи/показа повтора — одна таблица вместо 11 отдельных top-level local.
+local Replay = {
+	replayFrames = {},
+	replayClock = 0,
+	replaySampleTimer = 0,
+	replayActive = false,
+	replayTime = 0,
+	replayDuration = SETTINGS.REPLAY_DURATION,
+	replaySourceStart = 0,
+	replaySourceEnd = 0,
+	replayFrameIndex = 1,
+	replaySkipRequested = false,
+	replayLiveState = nil,
+}
 local lastScorer = "player"
-local replayLiveState = nil
 
 local keysDown = {}
 local touchActive = false
@@ -277,17 +289,14 @@ local toastToken = 0
 
 --// Объявления вперёд (функции и UI-элементы заполнятся ниже) \\--
 local startMatch, goToMenu, finishMatch, resetKickoff, startCountdown, onGoal, updateHUD, showToast
-local screenGui, menuFrame, gameFrame, fieldFrame
-local playerChip, botChip, allyChip, enemy2Chip, playerDirMarker, botDirMarker, allyDirMarker, enemy2DirMarker, botNameLabel, ballFrame, ballBody, aimLine
-local scoreLeftLabel, scoreRightLabel, timerLabel, diffBadgeLabel
-local powerBarBg, powerBarFill, powerPercentLabel, countdownLabel, goalBanner, toastLabel
-local pauseOverlay, finishOverlay, finishTitle, finishScore, finishStats
-local menuSummaryLabel, cameraGameButton, rainbowGradient
-local replayPanel, replayTitle, replayProgressFill, replaySkipButton
-local modeButtons = {}
-local enemyDiffButtons = {}
-local allyDiffButtons = {}
-local cameraButtons = {}
+-- Все долгоживущие UI-ссылки держим в ОДНОЙ таблице.
+-- Это важно для Luau: десятки отдельных top-level local быстро упираются в лимит 200 регистров.
+local UI = {
+	modeButtons = {},
+	enemyDiffButtons = {},
+	allyDiffButtons = {},
+	cameraButtons = {},
+}
 
 --// Маленькие помощники \\--
 local function clamp(v, a, b)
@@ -615,8 +624,8 @@ local function fieldSizeToUI(w, h)
 end
 
 local function screenToField(screenPos)
-	local ap = fieldFrame.AbsolutePosition
-	local as = fieldFrame.AbsoluteSize
+	local ap = UI.fieldFrame.AbsolutePosition
+	local as = UI.fieldFrame.AbsoluteSize
 	if as.X < 1 or as.Y < 1 then
 		return ballPos
 	end
@@ -628,11 +637,11 @@ local function isScreenPosInsideField(screenPos)
 	-- В крупном плане поле увеличено и частично за кадром: удар принимаем по всей
 	-- игровой зоне ниже верхней панели (сама панель с кнопками не трогается).
 	if cameraMode == "Close" then
-		local gs = gameFrame.AbsoluteSize
+		local gs = UI.gameFrame.AbsoluteSize
 		return screenPos.Y > gs.Y * 0.108 and screenPos.Y < gs.Y * 0.99
 	end
-	local ap = fieldFrame.AbsolutePosition
-	local as = fieldFrame.AbsoluteSize
+	local ap = UI.fieldFrame.AbsolutePosition
+	local as = UI.fieldFrame.AbsoluteSize
 	return screenPos.X >= ap.X and screenPos.X <= ap.X + as.X
 		and screenPos.Y >= ap.Y and screenPos.Y <= ap.Y + as.Y
 end
@@ -640,6 +649,7 @@ end
 --================================================================================
 --  ВЫКЛЮЧАЕМ 3D-ПЕРСОНАЖА: игра полностью экранная, WASD не должны двигать человечка
 --================================================================================
+do -- одноразовая настройка персонажа/камеры: локалы не должны жить до конца файла
 task.spawn(function()
 	local ok, playerModule = pcall(function()
 		return require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule"))
@@ -666,11 +676,12 @@ local camera = workspace.CurrentCamera
 if camera then
 	camera.CameraType = Enum.CameraType.Scriptable
 end
+end -- настройка персонажа/камеры
 
 --================================================================================
 --  СТРОИМ ИНТЕРФЕЙС
 --================================================================================
-screenGui = create("ScreenGui", {
+UI.screenGui = create("ScreenGui", {
 	Name = "ROBALL_GUI",
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
@@ -681,17 +692,18 @@ screenGui = create("ScreenGui", {
 --------------------------------------------------------------------------------
 --  ГЛАВНОЕ МЕНЮ (на весь экран)
 --------------------------------------------------------------------------------
-menuFrame = create("Frame", {
+UI.menuFrame = create("Frame", {
 	Name = "Menu",
 	Size = UDim2.fromScale(1, 1),
 	BackgroundColor3 = COL.DarkBg,
 	BorderSizePixel = 0,
 	ZIndex = 1,
-}, screenGui)
-addGradient(menuFrame, Color3.fromRGB(8, 32, 22), Color3.fromRGB(5, 12, 26), 90)
+}, UI.screenGui)
+addGradient(UI.menuFrame, Color3.fromRGB(8, 32, 22), Color3.fromRGB(5, 12, 26), 90)
 
 -- ЛОББИ СПЕЦИАЛЬНО БЕЗ ПОЛЯ И БЕЗ лишних картинок:
 -- только ровные отдельные ряды, ничего не залезает одно на другое.
+do -- заголовок лобби строится один раз, его локалы освобождаются сразу после блока
 local function addRainbowGradient(obj)
 	local g = Instance.new("UIGradient")
 	g.Color = ColorSequence.new({
@@ -709,7 +721,7 @@ local function addRainbowGradient(obj)
 end
 
 -- Название игры: ROBALL радугой и со свечением
-local titleLabel = makeText(menuFrame, {
+local titleLabel = makeText(UI.menuFrame, {
 	Name = "Title",
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.028),
@@ -724,7 +736,7 @@ local titleLabel = makeText(menuFrame, {
 	ZIndex = 5,
 })
 create("UITextSizeConstraint", { MaxTextSize = 88 }, titleLabel)
-rainbowGradient = addRainbowGradient(titleLabel)
+UI.rainbowGradient = addRainbowGradient(titleLabel)
 
 -- Тонкая радужная светящаяся линия под названием (отдельный ряд, не касается текста)
 local titleLine = create("Frame", {
@@ -734,11 +746,11 @@ local titleLine = create("Frame", {
 	BackgroundColor3 = COL.White,
 	BorderSizePixel = 0,
 	ZIndex = 5,
-}, menuFrame)
+}, UI.menuFrame)
 addCorner(titleLine, 1, 0)
 addRainbowGradient(titleLine)
 
-makeText(menuFrame, {
+makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.198),
 	Size = UDim2.fromScale(0.82, 0.042),
@@ -750,6 +762,9 @@ makeText(menuFrame, {
 	ZIndex = 5,
 })
 
+end -- заголовок лобби
+
+do -- каталог настроек: панели, карточки и refresh-кнопки нужны как локалы только при построении
 -- Центральная панель-каталог: каждая настройка лежит в своей отдельной карточке.
 local menuPanel = create("Frame", {
 	Name = "Panel",
@@ -760,7 +775,7 @@ local menuPanel = create("Frame", {
 	BackgroundTransparency = 0.04,
 	BorderSizePixel = 0,
 	ZIndex = 5,
-}, menuFrame)
+}, UI.menuFrame)
 addCorner(menuPanel, 0, 18)
 addStroke(menuPanel, COL.White, 2, 0.72)
 addGradient(menuPanel, Color3.fromRGB(17, 34, 48), Color3.fromRGB(8, 17, 26), 90)
@@ -840,8 +855,8 @@ makeText(menuPanel, {
 	TextColor3 = Color3.fromRGB(205, 218, 230),
 	ZIndex = 6,
 })
-modeButtons["1v1"] = makeOptionButton(menuPanel, "Mode_1v1", 0.05, 0.078, 0.435, 0.082, "1 НА 1")
-modeButtons["2v2"] = makeOptionButton(menuPanel, "Mode_2v2", 0.515, 0.078, 0.435, 0.082, "2 НА 2")
+UI.modeButtons["1v1"] = makeOptionButton(menuPanel, "Mode_1v1", 0.05, 0.078, 0.435, 0.082, "1 НА 1")
+UI.modeButtons["2v2"] = makeOptionButton(menuPanel, "Mode_2v2", 0.515, 0.078, 0.435, 0.082, "2 НА 2")
 
 local enemyCard
 enemyCard, enemyCardNote = makeCatalogCard("EnemyCatalog", 0.05, 0.185, 0.435, 0.315, "КРАСНАЯ КОМАНДА", COL.Bot)
@@ -851,8 +866,8 @@ allyCard, allyCardNote = makeCatalogCard("AllyCatalog", 0.515, 0.185, 0.435, 0.3
 for i, key in ipairs(DIFF_ORDER) do
 	local d = DIFFICULTIES[key]
 	local y = 0.205 + (i - 1) * 0.225
-	enemyDiffButtons[key] = makeOptionButton(enemyCard, "EnemyDiff_" .. key, 0.07, y, 0.86, 0.19, d.ButtonText)
-	allyDiffButtons[key] = makeOptionButton(allyCard, "AllyDiff_" .. key, 0.07, y, 0.86, 0.19, d.ButtonText)
+	UI.enemyDiffButtons[key] = makeOptionButton(enemyCard, "EnemyDiff_" .. key, 0.07, y, 0.86, 0.19, d.ButtonText)
+	UI.allyDiffButtons[key] = makeOptionButton(allyCard, "AllyDiff_" .. key, 0.07, y, 0.86, 0.19, d.ButtonText)
 end
 
 makeText(menuPanel, {
@@ -865,10 +880,10 @@ makeText(menuPanel, {
 	TextColor3 = Color3.fromRGB(205, 218, 230),
 	ZIndex = 6,
 })
-cameraButtons.Full = makeOptionButton(menuPanel, "Camera_Full", 0.05, 0.578, 0.435, 0.08, "ВСЁ ПОЛЕ")
-cameraButtons.Close = makeOptionButton(menuPanel, "Camera_Close", 0.515, 0.578, 0.435, 0.08, "ТОЛЬКО Я")
+UI.cameraButtons.Full = makeOptionButton(menuPanel, "Camera_Full", 0.05, 0.578, 0.435, 0.08, "ВСЁ ПОЛЕ")
+UI.cameraButtons.Close = makeOptionButton(menuPanel, "Camera_Close", 0.515, 0.578, 0.435, 0.08, "ТОЛЬКО Я")
 
-menuSummaryLabel = makeText(menuPanel, {
+UI.menuSummaryLabel = makeText(menuPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.678),
 	Size = UDim2.fromScale(0.9, 0.062),
@@ -880,8 +895,8 @@ menuSummaryLabel = makeText(menuPanel, {
 	TextColor3 = Color3.fromRGB(205, 218, 230),
 	ZIndex = 6,
 })
-addCorner(menuSummaryLabel, 1, 0)
-addStroke(menuSummaryLabel, COL.White, 1, 0.75)
+addCorner(UI.menuSummaryLabel, 1, 0)
+addStroke(UI.menuSummaryLabel, COL.White, 1, 0.75)
 
 playButton = makeButton(menuPanel, {
 	Name = "PlayButton",
@@ -914,11 +929,11 @@ local function refreshMenuSummary()
 	local enemyName = DIFFICULTIES[selectedEnemyDiffKey].ButtonText
 	local allyName = DIFFICULTIES[selectedAllyDiffKey].ButtonText
 	local cameraName = (cameraMode == "Full") and "всё поле" or "только я"
-	if menuSummaryLabel then
+	if UI.menuSummaryLabel then
 		if matchMode == "2v2" then
-			menuSummaryLabel.Text = "2 на 2: ты + напарник (" .. allyName .. ")  против двух красных (" .. enemyName .. ")  •  " .. cameraName
+			UI.menuSummaryLabel.Text = "2 на 2: ты + напарник (" .. allyName .. ")  против двух красных (" .. enemyName .. ")  •  " .. cameraName
 		else
-			menuSummaryLabel.Text = "1 на 1: ты против красного бота (" .. enemyName .. ")  •  " .. cameraName
+			UI.menuSummaryLabel.Text = "1 на 1: ты против красного бота (" .. enemyName .. ")  •  " .. cameraName
 		end
 	end
 	if playButton then
@@ -933,7 +948,7 @@ local function refreshMenuSummary()
 end
 
 local function refreshModeButtons()
-	for key, info in pairs(modeButtons) do
+	for key, info in pairs(UI.modeButtons) do
 		if key == matchMode then
 			info.Button.BackgroundColor3 = COL.GreenBtn
 			info.Stroke.Transparency = 0
@@ -943,7 +958,7 @@ local function refreshModeButtons()
 		end
 	end
 	-- В 1 на 1 карточка напарника остаётся в каталоге, но выглядит приглушённой.
-	for _, info in pairs(allyDiffButtons) do
+	for _, info in pairs(UI.allyDiffButtons) do
 		info.Button.BackgroundTransparency = (matchMode == "2v2") and 0 or 0.28
 		info.Button.TextTransparency = (matchMode == "2v2") and 0 or 0.38
 	end
@@ -951,7 +966,7 @@ local function refreshModeButtons()
 end
 
 local function refreshBotDifficultyButtons()
-	for key, info in pairs(enemyDiffButtons) do
+	for key, info in pairs(UI.enemyDiffButtons) do
 		if key == selectedEnemyDiffKey then
 			info.Button.BackgroundColor3 = DIFFICULTIES[key].Color
 			info.Stroke.Transparency = 0
@@ -960,7 +975,7 @@ local function refreshBotDifficultyButtons()
 			info.Stroke.Transparency = 1
 		end
 	end
-	for key, info in pairs(allyDiffButtons) do
+	for key, info in pairs(UI.allyDiffButtons) do
 		if key == selectedAllyDiffKey then
 			info.Button.BackgroundColor3 = DIFFICULTIES[key].Color
 			info.Stroke.Transparency = 0
@@ -972,8 +987,8 @@ local function refreshBotDifficultyButtons()
 	refreshMenuSummary()
 end
 
-local function refreshCameraButtons()
-	for key, info in pairs(cameraButtons) do
+UI.refreshCameraButtons = function()
+	for key, info in pairs(UI.cameraButtons) do
 		if key == cameraMode then
 			info.Button.BackgroundColor3 = COL.Player
 			info.Stroke.Transparency = 0
@@ -982,39 +997,39 @@ local function refreshCameraButtons()
 			info.Stroke.Transparency = 1
 		end
 	end
-	if cameraGameButton then
-		cameraGameButton.Text = (cameraMode == "Full") and "ВИД: ВСЁ ПОЛЕ" or "ВИД: ТОЛЬКО Я"
+	if UI.cameraGameButton then
+		UI.cameraGameButton.Text = (cameraMode == "Full") and "ВИД: ВСЁ ПОЛЕ" or "ВИД: ТОЛЬКО Я"
 	end
 	refreshMenuSummary()
 end
 
-for key, info in pairs(modeButtons) do
+for key, info in pairs(UI.modeButtons) do
 	info.Button.MouseButton1Click:Connect(function()
 		matchMode = key
 		refreshModeButtons()
 	end)
 end
-for key, info in pairs(enemyDiffButtons) do
+for key, info in pairs(UI.enemyDiffButtons) do
 	info.Button.MouseButton1Click:Connect(function()
 		selectedEnemyDiffKey = key
 		refreshBotDifficultyButtons()
 	end)
 end
-for key, info in pairs(allyDiffButtons) do
+for key, info in pairs(UI.allyDiffButtons) do
 	info.Button.MouseButton1Click:Connect(function()
 		selectedAllyDiffKey = key
 		refreshBotDifficultyButtons()
 	end)
 end
-for key, info in pairs(cameraButtons) do
+for key, info in pairs(UI.cameraButtons) do
 	info.Button.MouseButton1Click:Connect(function()
 		cameraMode = key
-		refreshCameraButtons()
+		UI.refreshCameraButtons()
 	end)
 end
 refreshModeButtons()
 refreshBotDifficultyButtons()
-refreshCameraButtons()
+UI.refreshCameraButtons()
 
 playButton.MouseButton1Click:Connect(function()
 	if startMatch then
@@ -1027,7 +1042,7 @@ local controlsText = "🎮 WASD — движение  •  ЛКМ — удар �
 if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
 	controlsText = "📱 Веди фишку пальцем  •  Зайди за мяч с нужной стороны  •  Кнопка «УДАР» бьёт по физике"
 end
-makeText(menuFrame, {
+makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.fromScale(0.5, 0.985),
 	Size = UDim2.fromScale(0.92, 0.045),
@@ -1039,30 +1054,33 @@ makeText(menuFrame, {
 	ZIndex = 5,
 })
 
-makeText(menuFrame, {
+makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1 • v1.6",
+	Text = "ЧАСТЬ 1 • v1.6.1",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
 	ZIndex = 5,
 })
 
+end -- каталог настроек
+
 --------------------------------------------------------------------------------
 --  ЭКРАН ИГРЫ
 --------------------------------------------------------------------------------
-gameFrame = create("Frame", {
+UI.gameFrame = create("Frame", {
 	Name = "Game",
 	Size = UDim2.fromScale(1, 1),
 	BackgroundColor3 = Color3.fromRGB(7, 16, 24),
 	BorderSizePixel = 0,
 	Visible = false,
 	ZIndex = 1,
-}, screenGui)
-addGradient(gameFrame, Color3.fromRGB(9, 24, 18), Color3.fromRGB(5, 10, 20), 90)
+}, UI.screenGui)
+addGradient(UI.gameFrame, Color3.fromRGB(9, 24, 18), Color3.fromRGB(5, 10, 20), 90)
 
+do -- блоки ТВ-табло нужны как локалы только при создании подписей счёта
 -- ТВ-табло матча как в футбольной трансляции: командные блоки, таймер и LIVE
 local scoreBoard = create("Frame", {
 	Name = "ScoreBoard",
@@ -1073,7 +1091,7 @@ local scoreBoard = create("Frame", {
 	BackgroundTransparency = 0.08,
 	BorderSizePixel = 0,
 	ZIndex = 20,
-}, gameFrame)
+}, UI.gameFrame)
 addCorner(scoreBoard, 0, 16)
 addStroke(scoreBoard, COL.White, 2, 0.58)
 addGradient(scoreBoard, Color3.fromRGB(16, 34, 54), Color3.fromRGB(4, 9, 17), 90)
@@ -1134,7 +1152,7 @@ local scoreRightBlock = create("Frame", {
 addCorner(scoreRightBlock, 0, 10)
 addGradient(scoreRightBlock, Color3.fromRGB(255, 105, 95), Color3.fromRGB(196, 24, 32), 90)
 
-scoreLeftLabel = makeText(scoreLeftBlock, {
+UI.scoreLeftLabel = makeText(scoreLeftBlock, {
 	Size = UDim2.fromScale(1, 1),
 	Text = "ВЫ  0",
 	Font = Enum.Font.GothamBlack,
@@ -1143,7 +1161,7 @@ scoreLeftLabel = makeText(scoreLeftBlock, {
 	TextColor3 = COL.White,
 	ZIndex = 22,
 })
-timerLabel = makeText(scoreTimerBlock, {
+UI.timerLabel = makeText(scoreTimerBlock, {
 	Size = UDim2.fromScale(1, 1),
 	Text = "2:00",
 	Font = Enum.Font.GothamBlack,
@@ -1152,7 +1170,7 @@ timerLabel = makeText(scoreTimerBlock, {
 	TextColor3 = COL.White,
 	ZIndex = 22,
 })
-scoreRightLabel = makeText(scoreRightBlock, {
+UI.scoreRightLabel = makeText(scoreRightBlock, {
 	Size = UDim2.fromScale(1, 1),
 	Text = "0  БОТ",
 	Font = Enum.Font.GothamBlack,
@@ -1162,7 +1180,9 @@ scoreRightLabel = makeText(scoreRightBlock, {
 	ZIndex = 22,
 })
 
-diffBadgeLabel = makeText(gameFrame, {
+end -- ТВ-табло
+
+UI.diffBadgeLabel = makeText(UI.gameFrame, {
 	AnchorPoint = Vector2.new(0, 0),
 	Position = UDim2.fromScale(0.012, 0.014),
 	Size = UDim2.fromScale(0.205, 0.037),
@@ -1175,11 +1195,11 @@ diffBadgeLabel = makeText(gameFrame, {
 	TextXAlignment = Enum.TextXAlignment.Center,
 	ZIndex = 20,
 })
-addCorner(diffBadgeLabel, 1, 0)
-addStroke(diffBadgeLabel, COL.White, 1, 0.65)
+addCorner(UI.diffBadgeLabel, 1, 0)
+addStroke(UI.diffBadgeLabel, COL.White, 1, 0.65)
 
 -- Кнопка вида прямо в матче: тот же выбор, что в настройках лобби.
-cameraGameButton = makeButton(gameFrame, {
+UI.cameraGameButton = makeButton(UI.gameFrame, {
 	Name = "CameraToggleButton",
 	AnchorPoint = Vector2.new(0, 0),
 	Position = UDim2.fromScale(0.012, 0.057),
@@ -1191,12 +1211,12 @@ cameraGameButton = makeButton(gameFrame, {
 	TextWrapped = false,
 	ZIndex = 25,
 })
-addCorner(cameraGameButton, 0, 10)
-addStroke(cameraGameButton, COL.White, 1, 0.58)
-addGradient(cameraGameButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
-refreshCameraButtons()
+addCorner(UI.cameraGameButton, 0, 10)
+addStroke(UI.cameraGameButton, COL.White, 1, 0.58)
+addGradient(UI.cameraGameButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
+UI.refreshCameraButtons()
 
-toastLabel = makeText(gameFrame, {
+UI.toastLabel = makeText(UI.gameFrame, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.10),
 	Size = UDim2.fromScale(0.7, 0.05),
@@ -1212,10 +1232,10 @@ toastLabel = makeText(gameFrame, {
 	Visible = false,
 	ZIndex = 30,
 })
-addCorner(toastLabel, 1, 0)
-addStroke(toastLabel, COL.White, 1, 0.62)
+addCorner(UI.toastLabel, 1, 0)
+addStroke(UI.toastLabel, COL.White, 1, 0.62)
 
-local pauseButton = makeButton(gameFrame, {
+UI.pauseButton = makeButton(UI.gameFrame, {
 	Name = "PauseButton",
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.988, 0.015),
@@ -1226,11 +1246,11 @@ local pauseButton = makeButton(gameFrame, {
 	TextScaled = true,
 	ZIndex = 25,
 })
-addCorner(pauseButton, 0, 12)
-addStroke(pauseButton, COL.White, 1, 0.58)
-addGradient(pauseButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
+addCorner(UI.pauseButton, 0, 12)
+addStroke(UI.pauseButton, COL.White, 1, 0.58)
+addGradient(UI.pauseButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
 
-local quitToMenuButton = makeButton(gameFrame, {
+UI.quitToMenuButton = makeButton(UI.gameFrame, {
 	Name = "QuitButton",
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.94, 0.015),
@@ -1241,13 +1261,13 @@ local quitToMenuButton = makeButton(gameFrame, {
 	TextScaled = true,
 	ZIndex = 25,
 })
-addCorner(quitToMenuButton, 0, 12)
-addStroke(quitToMenuButton, COL.White, 1, 0.58)
-addGradient(quitToMenuButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
+addCorner(UI.quitToMenuButton, 0, 12)
+addStroke(UI.quitToMenuButton, COL.White, 1, 0.58)
+addGradient(UI.quitToMenuButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
 
 -- Само поле. Его точный пиксельный размер и позицию каждый frame ставит
 -- updateFieldCamera(): поле стало больше и поддерживает крупный план за игроком.
-fieldFrame = create("Frame", {
+UI.fieldFrame = create("Frame", {
 	Name = "Field",
 	AnchorPoint = Vector2.new(0, 0),
 	Position = UDim2.fromOffset(20, 95),
@@ -1256,10 +1276,11 @@ fieldFrame = create("Frame", {
 	BorderSizePixel = 0,
 	ClipsDescendants = false,
 	ZIndex = 2,
-}, gameFrame)
-addGradient(fieldFrame, Color3.fromRGB(48, 166, 76), Color3.fromRGB(27, 122, 54), 0)
-addStroke(fieldFrame, COL.White, 3, 0.12)
+}, UI.gameFrame)
+addGradient(UI.fieldFrame, Color3.fromRGB(48, 166, 76), Color3.fromRGB(27, 122, 54), 0)
+addStroke(UI.fieldFrame, COL.White, 3, 0.12)
 
+do -- разметка и ворота рисуются один раз; их строительные локалы не живут дальше
 -- Полосы газона
 for i = 0, 9 do
 	create("Frame", {
@@ -1269,11 +1290,11 @@ for i = 0, 9 do
 		BackgroundTransparency = (i % 2 == 0) and 0.94 or 1,
 		BorderSizePixel = 0,
 		ZIndex = 2,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 end
 
 -- Только одно спокойное название в самом центре поля. Сверху и снизу подписей нет.
-makeText(fieldFrame, {
+makeText(UI.fieldFrame, {
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.5),
 	Size = UDim2.fromScale(0.48, 0.16),
@@ -1295,7 +1316,7 @@ create("Frame", {
 	BackgroundTransparency = 0.35,
 	BorderSizePixel = 0,
 	ZIndex = 3,
-}, fieldFrame)
+}, UI.fieldFrame)
 local centerCircle = create("Frame", {
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.5),
@@ -1303,7 +1324,7 @@ local centerCircle = create("Frame", {
 	BackgroundTransparency = 1,
 	BorderSizePixel = 0,
 	ZIndex = 3,
-}, fieldFrame)
+}, UI.fieldFrame)
 addCorner(centerCircle, 1, 0)
 addStroke(centerCircle, COL.White, 2, 0.45)
 local centerDot = create("Frame", {
@@ -1314,7 +1335,7 @@ local centerDot = create("Frame", {
 	BackgroundTransparency = 0.35,
 	BorderSizePixel = 0,
 	ZIndex = 3,
-}, fieldFrame)
+}, UI.fieldFrame)
 addCorner(centerDot, 1, 0)
 
 local function penaltyBox(isLeft)
@@ -1325,7 +1346,7 @@ local function penaltyBox(isLeft)
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		ZIndex = 3,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 	addStroke(box, COL.White, 2, 0.45)
 	local small = create("Frame", {
 		AnchorPoint = Vector2.new(isLeft and 0 or 1, 0.5),
@@ -1334,7 +1355,7 @@ local function penaltyBox(isLeft)
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		ZIndex = 3,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 	addStroke(small, COL.White, 2, 0.45)
 	local spot = create("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -1344,7 +1365,7 @@ local function penaltyBox(isLeft)
 		BackgroundTransparency = 0.38,
 		BorderSizePixel = 0,
 		ZIndex = 3,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 	addCorner(spot, 1, 0)
 end
 penaltyBox(true)
@@ -1364,7 +1385,7 @@ for _, c in ipairs(cornerLineData) do
 		BackgroundTransparency = 0.35,
 		BorderSizePixel = 0,
 		ZIndex = 3,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 end
 
 -- Ворота (сетки слева и справа, торчат за поле)
@@ -1378,7 +1399,7 @@ local function makeGoal(isLeft, color)
 		BackgroundTransparency = 0.22,
 		BorderSizePixel = 0,
 		ZIndex = 4,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 	addStroke(goal, COL.White, 3, 0)
 	-- «Сетка» — пара полосок внутри
 	for i = 1, 2 do
@@ -1415,13 +1436,15 @@ for _, p in ipairs(POSTS) do
 		BackgroundColor3 = COL.White,
 		BorderSizePixel = 0,
 		ZIndex = 7,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 	addCorner(post, 1, 0)
 	addStroke(post, COL.Black, 1, 0.3)
 end
 
+end -- разметка поля
+
 -- Линия прицела (видна, пока держишь ЛКМ)
-aimLine = create("Frame", {
+UI.aimLine = create("Frame", {
 	Name = "AimLine",
 	AnchorPoint = Vector2.new(0, 0.5),
 	Position = fieldPosToUI(ballPos),
@@ -1431,9 +1454,10 @@ aimLine = create("Frame", {
 	BorderSizePixel = 0,
 	Visible = false,
 	ZIndex = 6,
-}, fieldFrame)
-addCorner(aimLine, 1, 0)
+}, UI.fieldFrame)
+addCorner(UI.aimLine, 1, 0)
 
+do -- фабрики фишек/мяча нужны только на этапе построения моделей
 -- Персонажи и мяч: объёмная рисованная графика из GUI-фигур (картинки не нужны).
 local function addDisc(parent, name, cx, cy, size, color, transparency, z)
 	local disc = create("Frame", {
@@ -1459,7 +1483,7 @@ local function makeChip(options)
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		ZIndex = 8,
-	}, fieldFrame)
+	}, UI.fieldFrame)
 
 	-- Спокойная тень без лишних украшений
 	addDisc(chip, "Shadow", 0.56, 0.60, 0.92, COL.Black, 0.78, 1)
@@ -1566,40 +1590,40 @@ local function makeChip(options)
 	})
 	return chip, marker, nameLabel
 end
-playerChip, playerDirMarker = makeChip({
+UI.playerChip, UI.playerDirMarker = makeChip({
 	Name = "PlayerChip", Color = COL.Player, Number = "10", Label = "ВЫ",
 	SkinColor = Color3.fromRGB(245, 199, 160), HairColor = Color3.fromRGB(74, 48, 28),
 	MarkerColor = COL.Yellow, CustomId = CUSTOM_FACE_IMAGES.PLAYER, InitialFacing = 0,
 })
-allyChip, allyDirMarker = makeChip({
+UI.allyChip, UI.allyDirMarker = makeChip({
 	Name = "AllyChip", Color = Color3.fromRGB(0, 170, 230), Number = "7", Label = "НАПАРНИК",
 	SkinColor = Color3.fromRGB(196, 137, 96), HairColor = Color3.fromRGB(24, 24, 28),
 	MarkerColor = COL.White, InitialFacing = 0,
 })
-botChip, botDirMarker, botNameLabel = makeChip({
+UI.botChip, UI.botDirMarker, UI.botNameLabel = makeChip({
 	Name = "BotChip", Color = COL.Bot, Number = "9", Label = "БОТ",
 	SkinColor = Color3.fromRGB(239, 190, 150), HairColor = Color3.fromRGB(42, 34, 28),
 	MarkerColor = Color3.fromRGB(95, 240, 255), CustomId = CUSTOM_FACE_IMAGES.BOT, InitialFacing = math.pi,
 })
-enemy2Chip, enemy2DirMarker = makeChip({
+UI.enemy2Chip, UI.enemy2DirMarker = makeChip({
 	Name = "Enemy2Chip", Color = Color3.fromRGB(255, 105, 55), Number = "4", Label = "БОТ 2",
 	SkinColor = Color3.fromRGB(214, 160, 116), HairColor = Color3.fromRGB(96, 64, 34),
 	MarkerColor = COL.White, InitialFacing = math.pi,
 })
-allyChip.Visible = false
-enemy2Chip.Visible = false
+UI.allyChip.Visible = false
+UI.enemy2Chip.Visible = false
 
 -- Объёмный мяч: тень отдельно, вращающееся тело с панелями, швами и бликом
-ballFrame = create("Frame", {
+UI.ballFrame = create("Frame", {
 	Name = "Ball",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2),
 	BackgroundTransparency = 1,
 	BorderSizePixel = 0,
 	ZIndex = 11,
-}, fieldFrame)
-addDisc(ballFrame, "Shadow", 0.59, 0.64, 0.90, COL.Black, 0.74, 1)
-ballBody = create("Frame", {
+}, UI.fieldFrame)
+addDisc(UI.ballFrame, "Shadow", 0.59, 0.64, 0.90, COL.Black, 0.74, 1)
+UI.ballBody = create("Frame", {
 	Name = "BallBody",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.5),
@@ -1608,10 +1632,10 @@ ballBody = create("Frame", {
 	BorderSizePixel = 0,
 	ClipsDescendants = true,
 	ZIndex = 2,
-}, ballFrame)
-addCorner(ballBody, 1, 0)
-addStroke(ballBody, Color3.fromRGB(25, 28, 34), 2, 0)
-addGradient(ballBody, COL.White, Color3.fromRGB(205, 211, 218), 90)
+}, UI.ballFrame)
+addCorner(UI.ballBody, 1, 0)
+addStroke(UI.ballBody, Color3.fromRGB(25, 28, 34), 2, 0)
+addGradient(UI.ballBody, COL.White, Color3.fromRGB(205, 211, 218), 90)
 -- Короткие швы и классические чёрные панели без лишних колец и пятен
 for i = 0, 4 do
 	local a = -90 + i * 72
@@ -1624,7 +1648,7 @@ for i = 0, 4 do
 		BackgroundTransparency = 0.42,
 		BorderSizePixel = 0,
 		ZIndex = 3,
-	}, ballBody)
+	}, UI.ballBody)
 end
 local centerPatch = create("Frame", {
 	AnchorPoint = Vector2.new(0.5, 0.5),
@@ -1634,18 +1658,21 @@ local centerPatch = create("Frame", {
 	BackgroundColor3 = Color3.fromRGB(20, 23, 29),
 	BorderSizePixel = 0,
 	ZIndex = 4,
-}, ballBody)
+}, UI.ballBody)
 addCorner(centerPatch, 0.18, 0)
 for i = 0, 4 do
 	local rad = math.rad(-90 + i * 72)
-	addDisc(ballBody, "Patch", 0.5 + math.cos(rad) * 0.35, 0.5 + math.sin(rad) * 0.35, 0.21,
+	addDisc(UI.ballBody, "Patch", 0.5 + math.cos(rad) * 0.35, 0.5 + math.sin(rad) * 0.35, 0.21,
 		Color3.fromRGB(20, 23, 29), 0, 4)
 end
-addDisc(ballBody, "Highlight", 0.30, 0.25, 0.27, COL.White, 0.48, 6)
-addDisc(ballBody, "Shade", 0.75, 0.79, 0.40, Color3.fromRGB(70, 78, 90), 0.92, 5)
+addDisc(UI.ballBody, "Highlight", 0.30, 0.25, 0.27, COL.White, 0.48, 6)
+addDisc(UI.ballBody, "Shade", 0.75, 0.79, 0.40, Color3.fromRGB(70, 78, 90), 0.92, 5)
 
+end -- модели фишек и мяча
+
+do -- внутренний трек шкалы силы нужен только при построении
 -- ТВ-шкала силы удара: медленно заполняется и показывает реальную мягкую силу в %
-powerBarBg = create("Frame", {
+UI.powerBarBg = create("Frame", {
 	Name = "PowerBar",
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.fromScale(0.5, 0.987),
@@ -1655,11 +1682,11 @@ powerBarBg = create("Frame", {
 	BorderSizePixel = 0,
 	Visible = false,
 	ZIndex = 25,
-}, gameFrame)
-addCorner(powerBarBg, 1, 0)
-addStroke(powerBarBg, COL.White, 1, 0.50)
-addGradient(powerBarBg, Color3.fromRGB(18, 38, 58), Color3.fromRGB(5, 10, 18), 90)
-makeText(powerBarBg, {
+}, UI.gameFrame)
+addCorner(UI.powerBarBg, 1, 0)
+addStroke(UI.powerBarBg, COL.White, 1, 0.50)
+addGradient(UI.powerBarBg, Color3.fromRGB(18, 38, 58), Color3.fromRGB(5, 10, 18), 90)
+makeText(UI.powerBarBg, {
 	AnchorPoint = Vector2.new(0, 1),
 	Position = UDim2.new(0.02, 0, 0, -3),
 	Size = UDim2.new(0.58, 0, 0, 18),
@@ -1673,7 +1700,7 @@ makeText(powerBarBg, {
 	TextStrokeTransparency = 0.35,
 	ZIndex = 27,
 })
-powerPercentLabel = makeText(powerBarBg, {
+UI.powerPercentLabel = makeText(UI.powerBarBg, {
 	AnchorPoint = Vector2.new(1, 1),
 	Position = UDim2.new(0.98, 0, 0, -3),
 	Size = UDim2.new(0.30, 0, 0, 18),
@@ -1694,15 +1721,15 @@ local powerTrack = create("Frame", {
 	BackgroundColor3 = Color3.fromRGB(28, 38, 50),
 	BorderSizePixel = 0,
 	ZIndex = 25,
-}, powerBarBg)
+}, UI.powerBarBg)
 addCorner(powerTrack, 1, 0)
-powerBarFill = create("Frame", {
+UI.powerBarFill = create("Frame", {
 	Size = UDim2.fromScale(0, 1),
 	BackgroundColor3 = COL.GreenBtn,
 	BorderSizePixel = 0,
 	ZIndex = 26,
 }, powerTrack)
-addCorner(powerBarFill, 1, 0)
+addCorner(UI.powerBarFill, 1, 0)
 for i = 1, 3 do
 	create("Frame", {
 		Position = UDim2.fromScale(i / 4, 0),
@@ -1714,7 +1741,10 @@ for i = 1, 3 do
 	}, powerTrack)
 end
 
-local controlsHintLabel = makeText(gameFrame, {
+end -- шкала силы
+
+do -- подпись-подсказка оформляется один раз
+local controlsHintLabel = makeText(UI.gameFrame, {
 	AnchorPoint = Vector2.new(0, 1),
 	Position = UDim2.fromScale(0.012, 0.99),
 	Size = UDim2.fromScale(0.31, 0.04),
@@ -1732,8 +1762,10 @@ local controlsHintLabel = makeText(gameFrame, {
 addCorner(controlsHintLabel, 1, 0)
 addStroke(controlsHintLabel, COL.White, 1, 0.68)
 
+end -- подсказка управления
+
 -- Кнопка УДАР для телефона (на ПК скрыта)
-local kickButton = makeButton(gameFrame, {
+UI.kickButton = makeButton(UI.gameFrame, {
 	Name = "KickButton",
 	AnchorPoint = Vector2.new(1, 1),
 	Position = UDim2.fromScale(0.985, 0.985),
@@ -1746,12 +1778,12 @@ local kickButton = makeButton(gameFrame, {
 	Visible = UserInputService.TouchEnabled,
 	ZIndex = 26,
 })
-addCorner(kickButton, 1, 0)
-addStroke(kickButton, COL.White, 3, 0.2)
-addGradient(kickButton, Color3.fromRGB(255, 105, 95), Color3.fromRGB(196, 24, 32), 90)
+addCorner(UI.kickButton, 1, 0)
+addStroke(UI.kickButton, COL.White, 3, 0.2)
+addGradient(UI.kickButton, Color3.fromRGB(255, 105, 95), Color3.fromRGB(196, 24, 32), 90)
 
 -- Обратный отсчёт 3-2-1
-countdownLabel = makeText(gameFrame, {
+UI.countdownLabel = makeText(UI.gameFrame, {
 	Name = "Countdown",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.5),
@@ -1768,13 +1800,13 @@ countdownLabel = makeText(gameFrame, {
 	Visible = false,
 	ZIndex = 40,
 })
-local countdownScale = Instance.new("UIScale")
-countdownScale.Parent = countdownLabel
-addCorner(countdownLabel, 0, 24)
-addStroke(countdownLabel, COL.White, 2, 0.48)
+UI.countdownScale = Instance.new("UIScale")
+UI.countdownScale.Parent = UI.countdownLabel
+addCorner(UI.countdownLabel, 0, 24)
+addStroke(UI.countdownLabel, COL.White, 2, 0.48)
 
 -- Баннер «ГООООЛ!»
-goalBanner = makeText(gameFrame, {
+UI.goalBanner = makeText(UI.gameFrame, {
 	Name = "GoalBanner",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.42),
@@ -1791,13 +1823,14 @@ goalBanner = makeText(gameFrame, {
 	Visible = false,
 	ZIndex = 41,
 })
-local goalBannerScale = Instance.new("UIScale")
-goalBannerScale.Parent = goalBanner
-addCorner(goalBanner, 0, 24)
-addStroke(goalBanner, COL.Yellow, 2, 0.30)
+UI.goalBannerScale = Instance.new("UIScale")
+UI.goalBannerScale.Parent = UI.goalBanner
+addCorner(UI.goalBanner, 0, 24)
+addStroke(UI.goalBanner, COL.Yellow, 2, 0.30)
 
+do -- фон прогресса повтора нужен только как родитель при построении
 -- Панель замедленного повтора гола
-replayPanel = create("Frame", {
+UI.replayPanel = create("Frame", {
 	Name = "ReplayPanel",
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.096),
@@ -1807,11 +1840,11 @@ replayPanel = create("Frame", {
 	BorderSizePixel = 0,
 	Visible = false,
 	ZIndex = 42,
-}, gameFrame)
-addCorner(replayPanel, 0, 12)
-addStroke(replayPanel, COL.White, 1, 0.58)
-addGradient(replayPanel, Color3.fromRGB(18, 36, 56), Color3.fromRGB(4, 8, 15), 90)
-replayTitle = makeText(replayPanel, {
+}, UI.gameFrame)
+addCorner(UI.replayPanel, 0, 12)
+addStroke(UI.replayPanel, COL.White, 1, 0.58)
+addGradient(UI.replayPanel, Color3.fromRGB(18, 36, 56), Color3.fromRGB(4, 8, 15), 90)
+UI.replayTitle = makeText(UI.replayPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.04),
 	Size = UDim2.fromScale(0.94, 0.52),
@@ -1829,16 +1862,16 @@ local replayProgressBg = create("Frame", {
 	BackgroundColor3 = Color3.fromRGB(35, 43, 55),
 	BorderSizePixel = 0,
 	ZIndex = 43,
-}, replayPanel)
+}, UI.replayPanel)
 addCorner(replayProgressBg, 1, 0)
-replayProgressFill = create("Frame", {
+UI.replayProgressFill = create("Frame", {
 	Size = UDim2.fromScale(0, 1),
 	BackgroundColor3 = COL.Yellow,
 	BorderSizePixel = 0,
 	ZIndex = 44,
 }, replayProgressBg)
-addCorner(replayProgressFill, 1, 0)
-replaySkipButton = makeButton(gameFrame, {
+addCorner(UI.replayProgressFill, 1, 0)
+UI.replaySkipButton = makeButton(UI.gameFrame, {
 	Name = "ReplaySkipButton",
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.fromScale(0.5, 0.955),
@@ -1851,10 +1884,13 @@ replaySkipButton = makeButton(gameFrame, {
 	Visible = false,
 	ZIndex = 43,
 })
-addCorner(replaySkipButton, 0, 12)
-addStroke(replaySkipButton, COL.White, 1, 0.52)
-addGradient(replaySkipButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
+addCorner(UI.replaySkipButton, 0, 12)
+addStroke(UI.replaySkipButton, COL.White, 1, 0.52)
+addGradient(UI.replaySkipButton, Color3.fromRGB(25, 52, 76), Color3.fromRGB(9, 20, 34), 90)
 
+end -- панель повтора
+
+do -- фабрика и панели оверлеев нужны как локалы только при построении
 --------------------------------------------------------------------------------
 --  Оверлей паузы
 --------------------------------------------------------------------------------
@@ -1866,7 +1902,7 @@ local function makeOverlay()
 		BorderSizePixel = 0,
 		Visible = false,
 		ZIndex = 50,
-	}, gameFrame)
+	}, UI.gameFrame)
 	local panel = create("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
@@ -1890,7 +1926,7 @@ local function makeOverlay()
 end
 
 local pausePanel
-pauseOverlay, pausePanel = makeOverlay()
+UI.pauseOverlay, pausePanel = makeOverlay()
 makeText(pausePanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.06),
@@ -1901,7 +1937,7 @@ makeText(pausePanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-local resumeButton = makeButton(pausePanel, {
+UI.resumeButton = makeButton(pausePanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.30),
 	Size = UDim2.fromScale(0.78, 0.17),
@@ -1911,8 +1947,8 @@ local resumeButton = makeButton(pausePanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-addCorner(resumeButton, 0, 12)
-local restartButtonP = makeButton(pausePanel, {
+addCorner(UI.resumeButton, 0, 12)
+UI.restartButtonP = makeButton(pausePanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.52),
 	Size = UDim2.fromScale(0.78, 0.17),
@@ -1922,8 +1958,8 @@ local restartButtonP = makeButton(pausePanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-addCorner(restartButtonP, 0, 12)
-local menuButtonP = makeButton(pausePanel, {
+addCorner(UI.restartButtonP, 0, 12)
+UI.menuButtonP = makeButton(pausePanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.74),
 	Size = UDim2.fromScale(0.78, 0.17),
@@ -1933,14 +1969,14 @@ local menuButtonP = makeButton(pausePanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-addCorner(menuButtonP, 0, 12)
+addCorner(UI.menuButtonP, 0, 12)
 
 --------------------------------------------------------------------------------
 --  Оверлей конца матча
 --------------------------------------------------------------------------------
 local finishPanel
-finishOverlay, finishPanel = makeOverlay()
-finishTitle = makeText(finishPanel, {
+UI.finishOverlay, finishPanel = makeOverlay()
+UI.finishTitle = makeText(finishPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.05),
 	Size = UDim2.fromScale(0.94, 0.20),
@@ -1951,7 +1987,7 @@ finishTitle = makeText(finishPanel, {
 	TextColor3 = COL.Yellow,
 	ZIndex = 52,
 })
-finishScore = makeText(finishPanel, {
+UI.finishScore = makeText(finishPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.26),
 	Size = UDim2.fromScale(0.9, 0.16),
@@ -1961,7 +1997,7 @@ finishScore = makeText(finishPanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-finishStats = makeText(finishPanel, {
+UI.finishStats = makeText(finishPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.44),
 	Size = UDim2.fromScale(0.92, 0.14),
@@ -1972,7 +2008,7 @@ finishStats = makeText(finishPanel, {
 	TextColor3 = Color3.fromRGB(190, 205, 220),
 	ZIndex = 52,
 })
-local rematchButton = makeButton(finishPanel, {
+UI.rematchButton = makeButton(finishPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.60),
 	Size = UDim2.fromScale(0.78, 0.16),
@@ -1983,8 +2019,8 @@ local rematchButton = makeButton(finishPanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-addCorner(rematchButton, 0, 12)
-local menuButtonF = makeButton(finishPanel, {
+addCorner(UI.rematchButton, 0, 12)
+UI.menuButtonF = makeButton(finishPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.80),
 	Size = UDim2.fromScale(0.78, 0.16),
@@ -1994,7 +2030,9 @@ local menuButtonF = makeButton(finishPanel, {
 	TextScaled = true,
 	ZIndex = 52,
 })
-addCorner(menuButtonF, 0, 12)
+addCorner(UI.menuButtonF, 0, 12)
+
+end -- оверлеи паузы/финала
 
 --================================================================================
 --  ИГРОВАЯ ЛОГИКА
@@ -2003,35 +2041,35 @@ addCorner(menuButtonF, 0, 12)
 function showToast(text, duration)
 	toastToken = toastToken + 1
 	local my = toastToken
-	toastLabel.Text = text
-	toastLabel.Visible = true
+	UI.toastLabel.Text = text
+	UI.toastLabel.Visible = true
 	task.delay(duration or 2, function()
 		if toastToken == my then
-			toastLabel.Visible = false
+			UI.toastLabel.Visible = false
 		end
 	end)
 end
 
 function updateHUD()
 	if isTeamMode then
-		scoreLeftLabel.Text = "СИНИЕ  " .. tostring(playerScore)
-		scoreRightLabel.Text = tostring(botScore) .. "  КРАСНЫЕ"
+		UI.scoreLeftLabel.Text = "СИНИЕ  " .. tostring(playerScore)
+		UI.scoreRightLabel.Text = tostring(botScore) .. "  КРАСНЫЕ"
 	else
-		scoreLeftLabel.Text = "ВЫ  " .. tostring(playerScore)
-		scoreRightLabel.Text = tostring(botScore) .. "  БОТ"
+		UI.scoreLeftLabel.Text = "ВЫ  " .. tostring(playerScore)
+		UI.scoreRightLabel.Text = tostring(botScore) .. "  БОТ"
 	end
 	if overtime then
-		timerLabel.Text = "ЗОЛОТОЙ ГОЛ"
-		timerLabel.TextColor3 = COL.Yellow
+		UI.timerLabel.Text = "ЗОЛОТОЙ ГОЛ"
+		UI.timerLabel.TextColor3 = COL.Yellow
 	else
 		local t = math.max(0, math.ceil(timeLeft))
 		local m = math.floor(t / 60)
 		local s = t % 60
-		timerLabel.Text = string.format("%d:%02d", m, s)
+		UI.timerLabel.Text = string.format("%d:%02d", m, s)
 		if timeLeft <= 10 then
-			timerLabel.TextColor3 = Color3.fromRGB(255, 80, 70)
+			UI.timerLabel.TextColor3 = Color3.fromRGB(255, 80, 70)
 		else
-			timerLabel.TextColor3 = COL.White
+			UI.timerLabel.TextColor3 = COL.White
 		end
 	end
 end
@@ -2040,8 +2078,8 @@ local function cancelCharge()
 	isCharging = false
 	chargePower = 0
 	chargeAimToGoal = false
-	powerBarBg.Visible = false
-	aimLine.Visible = false
+	UI.powerBarBg.Visible = false
+	UI.aimLine.Visible = false
 end
 
 -- Расстановка перед стартовым свистком. kickoffTeam: "player" или "Bot" (кто владеет мячом с центра)
@@ -2053,11 +2091,11 @@ function resetKickoff(kickoffTeam)
 	ballRotation = 0
 	playerFacingAngle = 0
 	botFacingAngle = math.pi
-	replayFrames = {}
-	replayClock = 0
-	replaySampleTimer = 0
-	replayActive = false
-	replaySkipRequested = false
+	Replay.replayFrames = {}
+	Replay.replayClock = 0
+	Replay.replaySampleTimer = 0
+	Replay.replayActive = false
+	Replay.replaySkipRequested = false
 
 	local allyPos, enemy2Pos
 	if kickoffTeam == "player" then
@@ -2094,54 +2132,54 @@ function resetKickoff(kickoffTeam)
 	end
 	resetExtra(allyActor, allyPos, 0, currentAllyDiff)
 	resetExtra(enemy2Actor, enemy2Pos, math.pi, currentDiff)
-	if allyChip then allyChip.Visible = isTeamMode end
-	if enemy2Chip then enemy2Chip.Visible = isTeamMode end
+	if UI.allyChip then UI.allyChip.Visible = isTeamMode end
+	if UI.enemy2Chip then UI.enemy2Chip.Visible = isTeamMode end
 
 	if cameraMode == "Close" then
 		cameraCenter = playerPos * 0.78 + ballPos * 0.22
 	else
 		cameraCenter = Vector2.new(FIELD_W / 2, FIELD_H / 2)
 	end
-	botTargetPos = botPos
-	botMode = (kickoffTeam == "Bot") and "Attack" or "Challenge"
-	botCommitTimer = (kickoffTeam == "Bot") and 2.5 or 0
-	botPressTimer = 4
-	botRecoveryTimer = 0
-	botCornerTimer = 0
-	botTargetIsBall = false
-	ballWallTimer = 0
-	botStuckSampleTimer = 0
-	botStuckScore = 0
-	botLastSamplePos = botPos
-	botLastBallSamplePos = ballPos
-	botThinkTimer = 0
-	botKickCooldown = 0.6
-	ballIdleTimer = 0
+	BotAI.botTargetPos = botPos
+	BotAI.botMode = (kickoffTeam == "Bot") and "Attack" or "Challenge"
+	BotAI.botCommitTimer = (kickoffTeam == "Bot") and 2.5 or 0
+	BotAI.botPressTimer = 4
+	BotAI.botRecoveryTimer = 0
+	BotAI.botCornerTimer = 0
+	BotAI.botTargetIsBall = false
+	BotAI.ballWallTimer = 0
+	BotAI.botStuckSampleTimer = 0
+	BotAI.botStuckScore = 0
+	BotAI.botLastSamplePos = botPos
+	BotAI.botLastBallSamplePos = ballPos
+	BotAI.botThinkTimer = 0
+	BotAI.botKickCooldown = 0.6
+	BotAI.ballIdleTimer = 0
 	cancelCharge()
 end
 
 function startCountdown()
 	state = "Countdown"
 	local my = matchToken
-	countdownLabel.Visible = true
+	UI.countdownLabel.Visible = true
 	task.spawn(function()
 		for i = 3, 1, -1 do
 			if matchToken ~= my then return end
-			countdownLabel.Text = tostring(i)
+			UI.countdownLabel.Text = tostring(i)
 			playSfx(SFX.Click, 0.08, 0.85 + (3 - i) * 0.18)
-			countdownScale.Scale = 1.5
-			TweenService:Create(countdownScale, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+			UI.countdownScale.Scale = 1.5
+			TweenService:Create(UI.countdownScale, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 			task.wait(0.65)
 		end
 		if matchToken ~= my then return end
-		countdownLabel.Text = "⚽ ИГРА!"
+		UI.countdownLabel.Text = "⚽ ИГРА!"
 		playSfx(SFX.Click, 0.10, 1.35)
-		countdownScale.Scale = 1.4
-		TweenService:Create(countdownScale, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+		UI.countdownScale.Scale = 1.4
+		TweenService:Create(UI.countdownScale, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 		state = "Playing"
 		task.wait(0.45)
 		if matchToken == my then
-			countdownLabel.Visible = false
+			UI.countdownLabel.Visible = false
 		end
 	end)
 end
@@ -2159,20 +2197,20 @@ function startMatch()
 	cancelCharge()
 
 	if isTeamMode then
-		diffBadgeLabel.Text = "2×2 • 🔴 " .. currentDiff.ButtonText .. " • 🔵 " .. currentAllyDiff.ButtonText
+		UI.diffBadgeLabel.Text = "2×2 • 🔴 " .. currentDiff.ButtonText .. " • 🔵 " .. currentAllyDiff.ButtonText
 	else
-		diffBadgeLabel.Text = "1×1 • 🔴 " .. currentDiff.ButtonText
+		UI.diffBadgeLabel.Text = "1×1 • 🔴 " .. currentDiff.ButtonText
 	end
-	if botNameLabel then
-		botNameLabel.Text = isTeamMode and "БОТ 1" or "БОТ"
+	if UI.botNameLabel then
+		UI.botNameLabel.Text = isTeamMode and "БОТ 1" or "БОТ"
 	end
-	menuFrame.Visible = false
-	gameFrame.Visible = true
-	pauseOverlay.Visible = false
-	finishOverlay.Visible = false
-	goalBanner.Visible = false
-	if replayPanel then replayPanel.Visible = false end
-	if replaySkipButton then replaySkipButton.Visible = false end
+	UI.menuFrame.Visible = false
+	UI.gameFrame.Visible = true
+	UI.pauseOverlay.Visible = false
+	UI.finishOverlay.Visible = false
+	UI.goalBanner.Visible = false
+	if UI.replayPanel then UI.replayPanel.Visible = false end
+	if UI.replaySkipButton then UI.replaySkipButton.Visible = false end
 
 	resetKickoff("player") -- первый мяч с центра — у игрока, честно 😉
 	updateHUD()
@@ -2184,46 +2222,46 @@ function goToMenu()
 	state = "Menu"
 	cancelCharge()
 	keysDown = {}
-	pauseOverlay.Visible = false
-	finishOverlay.Visible = false
-	countdownLabel.Visible = false
-	goalBanner.Visible = false
-	toastLabel.Visible = false
-	replayActive = false
-	if replayPanel then replayPanel.Visible = false end
-	if replaySkipButton then replaySkipButton.Visible = false end
-	gameFrame.Visible = false
-	menuFrame.Visible = true
+	UI.pauseOverlay.Visible = false
+	UI.finishOverlay.Visible = false
+	UI.countdownLabel.Visible = false
+	UI.goalBanner.Visible = false
+	UI.toastLabel.Visible = false
+	Replay.replayActive = false
+	if UI.replayPanel then UI.replayPanel.Visible = false end
+	if UI.replaySkipButton then UI.replaySkipButton.Visible = false end
+	UI.gameFrame.Visible = false
+	UI.menuFrame.Visible = true
 end
 
 local function togglePause(forcePause)
 	if state == "Playing" or (forcePause and state == "Countdown") then
 		state = "Paused"
 		cancelCharge()
-		pauseOverlay.Visible = true
+		UI.pauseOverlay.Visible = true
 	elseif state == "Paused" and not forcePause then
 		state = "Playing"
-		pauseOverlay.Visible = false
+		UI.pauseOverlay.Visible = false
 	end
 end
 
 function finishMatch()
 	state = "Finished"
 	cancelCharge()
-	countdownLabel.Visible = false
-	goalBanner.Visible = false
-	if replayPanel then replayPanel.Visible = false end
-	if replaySkipButton then replaySkipButton.Visible = false end
+	UI.countdownLabel.Visible = false
+	UI.goalBanner.Visible = false
+	if UI.replayPanel then UI.replayPanel.Visible = false end
+	if UI.replaySkipButton then UI.replaySkipButton.Visible = false end
 
 	local playerWon = playerScore > botScore
 	if playerWon then
-		finishTitle.Text = "🏆 ПОБЕДА!"
-		finishTitle.TextColor3 = COL.Yellow
+		UI.finishTitle.Text = "🏆 ПОБЕДА!"
+		UI.finishTitle.TextColor3 = COL.Yellow
 	else
-		finishTitle.Text = "😤 ПОРАЖЕНИЕ"
-		finishTitle.TextColor3 = Color3.fromRGB(255, 110, 100)
+		UI.finishTitle.Text = "😤 ПОРАЖЕНИЕ"
+		UI.finishTitle.TextColor3 = Color3.fromRGB(255, 110, 100)
 	end
-	finishScore.Text = tostring(playerScore) .. "  :  " .. tostring(botScore)
+	UI.finishScore.Text = tostring(playerScore) .. "  :  " .. tostring(botScore)
 	local reason
 	if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS then
 		reason = "Матч до " .. tostring(SETTINGS.WIN_GOALS) .. " голов завершён досрочно."
@@ -2238,8 +2276,8 @@ function finishMatch()
 	local diffText = isTeamMode
 		and ("\nСоперники: " .. currentDiff.Title .. " • Напарник: " .. currentAllyDiff.Title)
 		or ("\nСложность: " .. currentDiff.Title)
-	finishStats.Text = reason .. shotText .. diffText
-	finishOverlay.Visible = true
+	UI.finishStats.Text = reason .. shotText .. diffText
+	UI.finishOverlay.Visible = true
 end
 
 -- Конфетти при голе 🎉
@@ -2256,7 +2294,7 @@ local function spawnConfetti()
 			BackgroundColor3 = colors[rng:NextInteger(1, #colors)],
 			BorderSizePixel = 0,
 			ZIndex = 45,
-		}, gameFrame)
+		}, UI.gameFrame)
 		local drift = rng:NextNumber(-0.06, 0.06)
 		TweenService:Create(piece, TweenInfo.new(rng:NextNumber(0.9, 1.4), Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
 			Position = UDim2.new(clamp(piece.Position.X.Scale + drift, 0, 1), 0, 1, 30),
@@ -2271,14 +2309,14 @@ local function recordReplayFrame(dt)
 	if state ~= "Playing" and state ~= "Goal" then
 		return
 	end
-	replayClock = replayClock + dt
-	replaySampleTimer = replaySampleTimer - dt
-	if replaySampleTimer > 0 then
+	Replay.replayClock = Replay.replayClock + dt
+	Replay.replaySampleTimer = Replay.replaySampleTimer - dt
+	if Replay.replaySampleTimer > 0 then
 		return
 	end
-	replaySampleTimer = 1 / 30
-	table.insert(replayFrames, {
-		t = replayClock,
+	Replay.replaySampleTimer = 1 / 30
+	table.insert(Replay.replayFrames, {
+		t = Replay.replayClock,
 		p = playerPos,
 		b = botPos,
 		ball = ballPos,
@@ -2290,18 +2328,18 @@ local function recordReplayFrame(dt)
 		e2 = enemy2Actor.Pos,
 		e2f = enemy2Actor.Facing,
 	})
-	local cutoff = replayClock - (SETTINGS.REPLAY_SOURCE + 1.6)
-	while #replayFrames > 2 and replayFrames[1].t < cutoff do
-		table.remove(replayFrames, 1)
+	local cutoff = Replay.replayClock - (SETTINGS.REPLAY_SOURCE + 1.6)
+	while #Replay.replayFrames > 2 and Replay.replayFrames[1].t < cutoff do
+		table.remove(Replay.replayFrames, 1)
 	end
 end
 
 local function hideReplayUI()
-	if replayPanel then
-		replayPanel.Visible = false
+	if UI.replayPanel then
+		UI.replayPanel.Visible = false
 	end
-	if replaySkipButton then
-		replaySkipButton.Visible = false
+	if UI.replaySkipButton then
+		UI.replaySkipButton.Visible = false
 	end
 end
 
@@ -2309,9 +2347,9 @@ local function completeGoalSequence()
 	if state ~= "Goal" and state ~= "Replay" then
 		return
 	end
-	replayActive = false
+	Replay.replayActive = false
 	hideReplayUI()
-	goalBanner.Visible = false
+	UI.goalBanner.Visible = false
 	if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS or overtime then
 		finishMatch()
 	else
@@ -2328,61 +2366,61 @@ local function replayTitleText()
 end
 
 local function startGoalReplay()
-	if #replayFrames < 2 then
+	if #Replay.replayFrames < 2 then
 		completeGoalSequence()
 		return
 	end
-	replayLiveState = {
+	Replay.replayLiveState = {
 		p = playerPos, b = botPos, ball = ballPos,
 		pv = playerVel, bv = botVel, ballv = ballVel,
 		rot = ballRotation, pf = playerFacingAngle, bf = botFacingAngle,
 		a1 = allyActor.Pos, a1v = allyActor.Vel, a1f = allyActor.Facing,
 		e2 = enemy2Actor.Pos, e2v = enemy2Actor.Vel, e2f = enemy2Actor.Facing,
 	}
-	replaySourceEnd = replayFrames[#replayFrames].t
-	replaySourceStart = math.max(replayFrames[1].t, replaySourceEnd - SETTINGS.REPLAY_SOURCE)
-	replayFrameIndex = 1
-	while replayFrameIndex < #replayFrames and replayFrames[replayFrameIndex + 1].t <= replaySourceStart do
-		replayFrameIndex = replayFrameIndex + 1
+	Replay.replaySourceEnd = Replay.replayFrames[#Replay.replayFrames].t
+	Replay.replaySourceStart = math.max(Replay.replayFrames[1].t, Replay.replaySourceEnd - SETTINGS.REPLAY_SOURCE)
+	Replay.replayFrameIndex = 1
+	while Replay.replayFrameIndex < #Replay.replayFrames and Replay.replayFrames[Replay.replayFrameIndex + 1].t <= Replay.replaySourceStart do
+		Replay.replayFrameIndex = Replay.replayFrameIndex + 1
 	end
-	local sourceDuration = replaySourceEnd - replaySourceStart
+	local sourceDuration = Replay.replaySourceEnd - Replay.replaySourceStart
 	if sourceDuration < 0.2 then
 		completeGoalSequence()
 		return
 	end
-	replayDuration = SETTINGS.REPLAY_DURATION -- ровно 7 секунд на экране
-	replayTime = 0
-	replayActive = true
+	Replay.replayDuration = SETTINGS.REPLAY_DURATION -- ровно 7 секунд на экране
+	Replay.replayTime = 0
+	Replay.replayActive = true
 	state = "Replay"
-	goalBanner.Visible = false
-	replayPanel.Visible = true
-	replaySkipButton.Visible = true
-	replayTitle.Text = replayTitleText()
-	replayProgressFill.Size = UDim2.fromScale(0, 1)
+	UI.goalBanner.Visible = false
+	UI.replayPanel.Visible = true
+	UI.replaySkipButton.Visible = true
+	UI.replayTitle.Text = replayTitleText()
+	UI.replayProgressFill.Size = UDim2.fromScale(0, 1)
 end
 
 local function endGoalReplay()
 	if state ~= "Replay" then
 		return
 	end
-	replayActive = false
+	Replay.replayActive = false
 	hideReplayUI()
-	if replayLiveState then
-		playerPos = replayLiveState.p
-		botPos = replayLiveState.b
-		ballPos = replayLiveState.ball
-		playerVel = replayLiveState.pv
-		botVel = replayLiveState.bv
-		ballVel = replayLiveState.ballv
-		ballRotation = replayLiveState.rot
-		playerFacingAngle = replayLiveState.pf
-		botFacingAngle = replayLiveState.bf
-		allyActor.Pos = replayLiveState.a1
-		allyActor.Vel = replayLiveState.a1v
-		allyActor.Facing = replayLiveState.a1f
-		enemy2Actor.Pos = replayLiveState.e2
-		enemy2Actor.Vel = replayLiveState.e2v
-		enemy2Actor.Facing = replayLiveState.e2f
+	if Replay.replayLiveState then
+		playerPos = Replay.replayLiveState.p
+		botPos = Replay.replayLiveState.b
+		ballPos = Replay.replayLiveState.ball
+		playerVel = Replay.replayLiveState.pv
+		botVel = Replay.replayLiveState.bv
+		ballVel = Replay.replayLiveState.ballv
+		ballRotation = Replay.replayLiveState.rot
+		playerFacingAngle = Replay.replayLiveState.pf
+		botFacingAngle = Replay.replayLiveState.bf
+		allyActor.Pos = Replay.replayLiveState.a1
+		allyActor.Vel = Replay.replayLiveState.a1v
+		allyActor.Facing = Replay.replayLiveState.a1f
+		enemy2Actor.Pos = Replay.replayLiveState.e2
+		enemy2Actor.Vel = Replay.replayLiveState.e2v
+		enemy2Actor.Facing = Replay.replayLiveState.e2f
 	end
 	completeGoalSequence()
 end
@@ -2400,8 +2438,8 @@ function onGoal(scorer) -- scorer: "player" (синие) или "Bot" (крас�
 	end
 	state = "Goal"
 	lastScorer = scorer
-	replaySkipRequested = false
-	replayActive = false
+	Replay.replaySkipRequested = false
+	Replay.replayActive = false
 	cancelCharge()
 	if scorer == "player" then
 		playerScore = playerScore + 1
@@ -2410,11 +2448,11 @@ function onGoal(scorer) -- scorer: "player" (синие) или "Bot" (крас�
 	end
 	updateHUD()
 
-	goalBanner.Text = goalBannerTextFor(scorer)
-	goalBanner.TextColor3 = (scorer == "player") and COL.Yellow or Color3.fromRGB(255, 110, 100)
-	goalBanner.Visible = true
-	goalBannerScale.Scale = 0.4
-	TweenService:Create(goalBannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	UI.goalBanner.Text = goalBannerTextFor(scorer)
+	UI.goalBanner.TextColor3 = (scorer == "player") and COL.Yellow or Color3.fromRGB(255, 110, 100)
+	UI.goalBanner.Visible = true
+	UI.goalBannerScale.Scale = 0.4
+	TweenService:Create(UI.goalBannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 	playSfx(SFX.Applause, (scorer == "player") and 0.26 or 0.15, 1, 3)
 	if scorer == "player" then
 		spawnConfetti()
@@ -2423,8 +2461,8 @@ function onGoal(scorer) -- scorer: "player" (синие) или "Bot" (крас�
 	local my = matchToken
 	task.delay(0.8, function()
 		if matchToken ~= my or state ~= "Goal" then return end
-		goalBanner.Visible = false
-		if replaySkipRequested then
+		UI.goalBanner.Visible = false
+		if Replay.replaySkipRequested then
 			completeGoalSequence()
 		else
 			startGoalReplay()
@@ -2471,9 +2509,9 @@ end
 
 local function pulseBall()
 	task.spawn(function()
-		ballFrame.Size = fieldSizeToUI(BALL_R * 2 * 1.12, BALL_R * 2 * 1.12)
+		UI.ballFrame.Size = fieldSizeToUI(BALL_R * 2 * 1.12, BALL_R * 2 * 1.12)
 		task.wait(0.05)
-		ballFrame.Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2)
+		UI.ballFrame.Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2)
 	end)
 end
 
@@ -2558,8 +2596,8 @@ local function releaseKick()
 	end
 	local power = math.max(chargePower, 0.06) -- совсем короткий клик = очень мягкий пас
 	isCharging = false
-	powerBarBg.Visible = false
-	aimLine.Visible = false
+	UI.powerBarBg.Visible = false
+	UI.aimLine.Visible = false
 
 	-- Если мяч не касается фишки, kickBall вернёт false и НИЧЕГО не произойдёт.
 	-- Рывка, телепорта скорости и движения персонажа от ЛКМ больше нет.
@@ -2572,74 +2610,74 @@ end
 --  ИИ БОТА
 --------------------------------------------------------------------------------
 local function botStep(dt)
-	botThinkTimer = botThinkTimer - dt
-	botKickCooldown = math.max(0, botKickCooldown - dt)
-	botCommitTimer = math.max(0, botCommitTimer - dt)
-	botPressTimer = botPressTimer - dt
-	if botPressTimer <= 0 then
+	BotAI.botThinkTimer = BotAI.botThinkTimer - dt
+	BotAI.botKickCooldown = math.max(0, BotAI.botKickCooldown - dt)
+	BotAI.botCommitTimer = math.max(0, BotAI.botCommitTimer - dt)
+	BotAI.botPressTimer = BotAI.botPressTimer - dt
+	if BotAI.botPressTimer <= 0 then
 		-- Даже если игрок долго держит мяч на своей половине,
 		-- бот периодически сам идёт в прессинг, а не ждёт у своих ворот.
-		botCommitTimer = math.max(botCommitTimer, 2.3)
-		botPressTimer = rng:NextNumber(6.5, 9.5)
+		BotAI.botCommitTimer = math.max(BotAI.botCommitTimer, 2.3)
+		BotAI.botPressTimer = rng:NextNumber(6.5, 9.5)
 	end
 	local d = currentDiff
-	botRecoveryTimer = math.max(0, botRecoveryTimer - dt)
+	BotAI.botRecoveryTimer = math.max(0, BotAI.botRecoveryTimer - dt)
 
 	local function startBotRecovery(fromPos, duration)
-		if botRecoveryTimer > 0 then
+		if BotAI.botRecoveryTimer > 0 then
 			return
 		end
-		botRecoveryTimer = duration or 1.15
+		BotAI.botRecoveryTimer = duration or 1.15
 		local toCenter = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - fromPos)
 		if toCenter.Magnitude < 0.01 then
 			toCenter = Vector2.new(1, 0)
 		end
 		local _, wallInward = getNearestWall(fromPos)
-		botRecoveryPoint = clampBotTarget(fromPos + wallInward * 175 + toCenter * 65)
-		botTargetPos = botRecoveryPoint
-		botTargetIsBall = false
-		botCornerTimer = 0
-		botStuckScore = 0
-		botThinkTimer = 0
+		BotAI.botRecoveryPoint = clampBotTarget(fromPos + wallInward * 175 + toCenter * 65)
+		BotAI.botTargetPos = BotAI.botRecoveryPoint
+		BotAI.botTargetIsBall = false
+		BotAI.botCornerTimer = 0
+		BotAI.botStuckScore = 0
+		BotAI.botThinkTimer = 0
 	end
 
 	-- Если мяч почти стоит у ЛЮБОГО борта, а бот его подпирает, бот обязан отойти.
 	local stuckBallDist = (ballPos - botPos).Magnitude
 	local ballAtWall = getWallBallInfo(ballPos)
 	if ballAtWall and ballVel.Magnitude < 70 and stuckBallDist < 125 then
-		botCornerTimer = botCornerTimer + dt
+		BotAI.botCornerTimer = BotAI.botCornerTimer + dt
 	else
-		botCornerTimer = math.max(0, botCornerTimer - dt * 2)
+		BotAI.botCornerTimer = math.max(0, BotAI.botCornerTimer - dt * 2)
 	end
-	if botCornerTimer > 0.75 then
+	if BotAI.botCornerTimer > 0.75 then
 		startBotRecovery(ballPos, 1.25)
 	end
 
 	-- Общий контроль застревания: бот хочет ехать, но за 0.45 сек почти не сдвинулся.
-	botStuckSampleTimer = botStuckSampleTimer + dt
-	if botStuckSampleTimer >= 0.45 then
-		local botMoved = (botPos - botLastSamplePos).Magnitude
-		local ballMoved = (ballPos - botLastBallSamplePos).Magnitude
-		local wantsToMove = (botTargetPos - botPos).Magnitude > 18
+	BotAI.botStuckSampleTimer = BotAI.botStuckSampleTimer + dt
+	if BotAI.botStuckSampleTimer >= 0.45 then
+		local botMoved = (botPos - BotAI.botLastSamplePos).Magnitude
+		local ballMoved = (ballPos - BotAI.botLastBallSamplePos).Magnitude
+		local wantsToMove = (BotAI.botTargetPos - botPos).Magnitude > 18
 		local wallBallSlow = ballAtWall and ballMoved < 11 and stuckBallDist < 145
 		local botNearWall = getNearestWall(botPos) <= PLAYER_R + 10
 		local pressedToWall = botNearWall and wantsToMove and botMoved < 14
-		if botRecoveryTimer <= 0 and ((wantsToMove and botMoved < 12) or wallBallSlow or pressedToWall) then
-			botStuckScore = botStuckScore + 1
+		if BotAI.botRecoveryTimer <= 0 and ((wantsToMove and botMoved < 12) or wallBallSlow or pressedToWall) then
+			BotAI.botStuckScore = BotAI.botStuckScore + 1
 		else
-			botStuckScore = math.max(0, botStuckScore - 1)
+			BotAI.botStuckScore = math.max(0, BotAI.botStuckScore - 1)
 		end
-		if botStuckScore >= 2 then
+		if BotAI.botStuckScore >= 2 then
 			startBotRecovery(wallBallSlow and ballPos or botPos, 1.25)
 		end
-		botLastSamplePos = botPos
-		botLastBallSamplePos = ballPos
-		botStuckSampleTimer = 0
+		BotAI.botLastSamplePos = botPos
+		BotAI.botLastBallSamplePos = ballPos
+		BotAI.botStuckSampleTimer = 0
 	end
 
 	-- «Мозг» бота просыпается раз в Reaction секунд (у сложного — чаще)
-	if botThinkTimer <= 0 then
-		botThinkTimer = d.Reaction
+	if BotAI.botThinkTimer <= 0 then
+		BotAI.botThinkTimer = d.Reaction
 
 		-- Предсказание перехвата: где мяч окажется, пока бот до него добежит
 		local distToBall = (ballPos - botPos).Magnitude
@@ -2675,24 +2713,24 @@ local function botStep(dt)
 		end
 
 		if ballThreat then
-			botMode = "Defend"
-		elseif botHasBall or botCommitTimer > 0 or canWinRace
+			BotAI.botMode = "Defend"
+		elseif botHasBall or BotAI.botCommitTimer > 0 or canWinRace
 			or predicted.X >= pressLine
 			or (looseBall and predicted.X >= pressLine - 110)
-			or ballIdleTimer > 1.2 then
-			botMode = "Attack"
+			or BotAI.ballIdleTimer > 1.2 then
+			BotAI.botMode = "Attack"
 		elseif playerHasBall and predicted.X >= 260 then
-			botMode = "Challenge"
+			BotAI.botMode = "Challenge"
 		else
-			botMode = "Defend"
+			BotAI.botMode = "Defend"
 		end
 
 		-- Только ближайший красный идёт до конца в мяч. Если Бот-2 заметно ближе,
 		-- главный бот открывается или страхует, а не создаёт давку у борта.
 		if enemy2Actor.Active and not botHasBall and not ballThreat and enemy2Dist + 5 < botDist then
-			botMode = blueHasBall and "Defend" or "Support"
+			BotAI.botMode = blueHasBall and "Defend" or "Support"
 		end
-		botTargetIsBall = false
+		BotAI.botTargetIsBall = false
 
 		-- Куда бот ХОЧЕТ отправить мяч. Отсюда считается и заход за мяч:
 		-- для физического удара бот встаёт С ПРОТИВОПОЛОЖНОЙ стороны.
@@ -2721,69 +2759,69 @@ local function botStep(dt)
 		local contactDir = unit2(predicted - botPos)
 		local alignment = contactDir:Dot(shotDir)
 
-		if botMode == "Attack" or botMode == "Challenge" then
+		if BotAI.botMode == "Attack" or BotAI.botMode == "Challenge" then
 			-- Сначала заходим за мяч с правильной стороны, и только потом идём в мяч.
 			-- Поэтому бот не толкает его случайно к своим воротам и реально ведёт атаку влево.
 			if botDist > 92 or alignment < 0.20 then
-				botTargetPos = approachPoint
-				botTargetIsBall = false
+				BotAI.botTargetPos = approachPoint
+				BotAI.botTargetIsBall = false
 			else
-				botTargetPos = predicted
-				botTargetIsBall = true
+				BotAI.botTargetPos = predicted
+				BotAI.botTargetIsBall = true
 			end
 		else
 			if ballThreat then
 				-- Угроза своим воротам: перехватываем мяч, по возможности со стороны ворот.
 				if botDist > 80 and alignment < 0.05 then
-					botTargetPos = approachPoint
-				botTargetIsBall = false
+					BotAI.botTargetPos = approachPoint
+				BotAI.botTargetIsBall = false
 				else
-					botTargetPos = predicted
-				botTargetIsBall = true
+					BotAI.botTargetPos = predicted
+				BotAI.botTargetIsBall = true
 				end
 			else
 				-- Редкая настоящая оборона — и та высокой линией, а не стоя в воротах.
 				local goalPos = Vector2.new(FIELD_W, GOAL_CENTER_Y)
 				local dirToBall = unit2(ballPos - goalPos)
 				local defPos = goalPos + dirToBall * 315
-				botTargetPos = Vector2.new(clamp(defPos.X, 540, 925), clamp(defPos.Y, 85, FIELD_H - 85))
-				botTargetIsBall = false
+				BotAI.botTargetPos = Vector2.new(clamp(defPos.X, 540, 925), clamp(defPos.Y, 85, FIELD_H - 85))
+				BotAI.botTargetIsBall = false
 			end
 		end
 
-		if wallBall and not approachReachable and botTargetPos == approachPoint then
-			botTargetIsBall = true -- финальная точка бокового касания у стены, не обычная навигационная цель
+		if wallBall and not approachReachable and BotAI.botTargetPos == approachPoint then
+			BotAI.botTargetIsBall = true -- финальная точка бокового касания у стены, не обычная навигационная цель
 		end
 
-		if botMode == "Support" then
+		if BotAI.botMode == "Support" then
 			local supportX = clamp(predicted.X - 215, 150, 735)
 			local openLaneY = (predicted.Y < GOAL_CENTER_Y) and 425 or 175
 			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75, FIELD_H - 75)
-			botTargetPos = Vector2.new(supportX, supportY)
+			BotAI.botTargetPos = Vector2.new(supportX, supportY)
 			if enemy2Actor.Active then
-				botTargetPos = separateBotTarget(botTargetPos, enemy2Actor.Pos, 94)
+				BotAI.botTargetPos = separateBotTarget(BotAI.botTargetPos, enemy2Actor.Pos, 94)
 			end
-			botTargetPos = separateBotTarget(botTargetPos, ballPos, 108)
-			botTargetIsBall = false
+			BotAI.botTargetPos = separateBotTarget(BotAI.botTargetPos, ballPos, 108)
+			BotAI.botTargetIsBall = false
 		end
 	end
 
-	if botRecoveryTimer > 0 then
-		botMode = "Recover"
-		botTargetPos = botRecoveryPoint
-		botTargetIsBall = false
+	if BotAI.botRecoveryTimer > 0 then
+		BotAI.botMode = "Recover"
+		BotAI.botTargetPos = BotAI.botRecoveryPoint
+		BotAI.botTargetIsBall = false
 	end
-	botTargetPos = botTargetIsBall and clampToField(botTargetPos, PLAYER_R) or clampBotTarget(botTargetPos)
+	BotAI.botTargetPos = BotAI.botTargetIsBall and clampToField(BotAI.botTargetPos, PLAYER_R) or clampBotTarget(BotAI.botTargetPos)
 
 	-- Движение бота: тот же физический подход, что у игрока.
-	local toTarget = botTargetPos - botPos
+	local toTarget = BotAI.botTargetPos - botPos
 	local targetDist = toTarget.Magnitude
 	local speedNow = d.Speed
 	if targetDist < 105 then
 		speedNow = speedNow * clamp(targetDist / 105, 0.22, 1)
 	end
 	local ballDistNow = (ballPos - botPos).Magnitude
-	if (botMode == "Attack" or botMode == "Challenge") and ballDistNow < 135 then
+	if (BotAI.botMode == "Attack" or BotAI.botMode == "Challenge") and ballDistNow < 135 then
 		-- Рядом с мячом бот контролирует скорость, чтобы не пролетать мяч насквозь
 		speedNow = math.min(speedNow, math.max(105, d.Speed * 0.76))
 	end
@@ -2791,7 +2829,7 @@ local function botStep(dt)
 	if targetDist > 4 then
 		desired = unit2(toTarget) * speedNow
 	end
-	desired = limitBotVelocityAtWall(botPos, desired, botTargetIsBall)
+	desired = limitBotVelocityAtWall(botPos, desired, BotAI.botTargetIsBall)
 	local botAccel = d.Accel or 600
 	if desired.Magnitude < 1 then
 		botAccel = botAccel * 1.15
@@ -2804,7 +2842,7 @@ local function botStep(dt)
 	botPos, botVel = applyFieldClamp(botPos, botVel, PLAYER_R)
 
 	-- Решение об ударе
-	if botRecoveryTimer <= 0 and botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
+	if BotAI.botRecoveryTimer <= 0 and BotAI.botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
 		local aim, power
 		if isInCornerZone(ballPos, 140) then
 			-- Не добиваем мяч в угол: цель только открытая зона внутри поля
@@ -2855,15 +2893,15 @@ local function botStep(dt)
 		if alignmentNow >= minAlignment or (emergency and alignmentNow > -0.35) then
 			-- Бот тоже бьёт только по линии контакта своих кругов; неточность даёт сам заход, а не магия.
 			if kickBall(true, power) then
-				botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
+				BotAI.botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
 				-- После ведения/выноса бот продолжает атаку за мячом
-				botCommitTimer = math.max(botCommitTimer, (ballPos.X > 820) and 1.7 or 2.3)
-				botMode = "Attack"
+				BotAI.botCommitTimer = math.max(BotAI.botCommitTimer, (ballPos.X > 820) and 1.7 or 2.3)
+				BotAI.botMode = "Attack"
 			end
 		else
-			botTargetPos = wallApproachPoint or clampBotTarget(ballPos - desiredDir * (PLAYER_R + BALL_R + 10))
-			botTargetIsBall = wallApproachPoint ~= nil
-			botThinkTimer = math.min(botThinkTimer, 0.05)
+			BotAI.botTargetPos = wallApproachPoint or clampBotTarget(ballPos - desiredDir * (PLAYER_R + BALL_R + 10))
+			BotAI.botTargetIsBall = wallApproachPoint ~= nil
+			BotAI.botThinkTimer = math.min(BotAI.botThinkTimer, 0.05)
 		end
 	end
 end
@@ -3040,7 +3078,7 @@ local function extraActorStep(actor, dt)
 		end
 
 		if actorHasBall or (threatToOwnGoal and actorClosest)
-			or (ballIdleTimer > 1.2 and actorClosest)
+			or (BotAI.ballIdleTimer > 1.2 and actorClosest)
 			or (actorClosest and (looseBall or opponentHasBall or actor.Commit > 0)) then
 			actor.Mode = "Chase"
 		elseif teammateHasBall then
@@ -3338,14 +3376,14 @@ local function ballStep(dt)
 		-- после короткой паузы он выкатывается от любой стены, а не только из угла.
 		local ballAtWall, wallDist, wallInward = getWallBallInfo(ballPos)
 		if ballAtWall and wallDist <= BALL_R + 9 and ballVel.Magnitude < 105 then
-			ballWallTimer = ballWallTimer + sdt
+			BotAI.ballWallTimer = BotAI.ballWallTimer + sdt
 		else
-			ballWallTimer = math.max(0, ballWallTimer - sdt * 2)
+			BotAI.ballWallTimer = math.max(0, BotAI.ballWallTimer - sdt * 2)
 		end
 		if isInCornerZone(ballPos, 115) and ballVel.Magnitude < 110 then
 			local inward = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - ballPos)
 			ballVel = ballVel + inward * (230 * sdt)
-		elseif ballWallTimer > 0.55 and ballAtWall then
+		elseif BotAI.ballWallTimer > 0.55 and ballAtWall then
 			ballVel = ballVel + wallInward * (310 * sdt)
 		end
 
@@ -3433,9 +3471,9 @@ local function playingStep(dt)
 		and (ballPos - playerPos).Magnitude > 120
 		and (ballPos - botPos).Magnitude > 120
 		and not extraNearBall then
-		ballIdleTimer = ballIdleTimer + dt
+		BotAI.ballIdleTimer = BotAI.ballIdleTimer + dt
 	else
-		ballIdleTimer = 0
+		BotAI.ballIdleTimer = 0
 	end
 
 	-- Таймер матча 2:00
@@ -3469,10 +3507,10 @@ end
 -- Камера поля: Full помещает ВСЁ большое поле в отведённую зону,
 -- Close увеличивает поле в 1.7 раза и плавно следит за игроком (чуть-чуть за мячом).
 local function updateFieldCamera(dt)
-	if not gameFrame or not fieldFrame then
+	if not UI.gameFrame or not UI.fieldFrame then
 		return
 	end
-	local viewport = gameFrame.AbsoluteSize
+	local viewport = UI.gameFrame.AbsoluteSize
 	if viewport.X < 50 or viewport.Y < 50 then
 		return
 	end
@@ -3516,8 +3554,8 @@ local function updateFieldCamera(dt)
 		areaCenter.X - (cameraCenter.X / FIELD_W) * fieldWpx,
 		areaCenter.Y - (cameraCenter.Y / FIELD_H) * fieldHpx
 	)
-	fieldFrame.Position = UDim2.fromOffset(topLeft.X, topLeft.Y)
-	fieldFrame.Size = UDim2.fromOffset(fieldWpx, fieldHpx)
+	UI.fieldFrame.Position = UDim2.fromOffset(topLeft.X, topLeft.Y)
+	UI.fieldFrame.Size = UDim2.fromOffset(fieldWpx, fieldHpx)
 end
 
 local function setDirectionMarker(marker, angle)
@@ -3532,10 +3570,10 @@ local function setDirectionMarker(marker, angle)
 end
 
 local function applyDirectionMarkers()
-	setDirectionMarker(playerDirMarker, playerFacingAngle)
-	setDirectionMarker(botDirMarker, botFacingAngle)
-	setDirectionMarker(allyDirMarker, allyActor.Facing)
-	setDirectionMarker(enemy2DirMarker, enemy2Actor.Facing)
+	setDirectionMarker(UI.playerDirMarker, playerFacingAngle)
+	setDirectionMarker(UI.botDirMarker, botFacingAngle)
+	setDirectionMarker(UI.allyDirMarker, allyActor.Facing)
+	setDirectionMarker(UI.enemy2DirMarker, enemy2Actor.Facing)
 end
 
 local function updateDirectionMarkers(dt)
@@ -3554,17 +3592,17 @@ local function updateDirectionMarkers(dt)
 end
 
 local function replayStep(dt)
-	if not replayActive then
+	if not Replay.replayActive then
 		return
 	end
-	replayTime = replayTime + dt
-	local sourceDuration = replaySourceEnd - replaySourceStart
-	local sourceT = replaySourceStart + math.min(sourceDuration, replayTime * (sourceDuration / replayDuration))
-	while replayFrameIndex < #replayFrames and replayFrames[replayFrameIndex + 1].t <= sourceT do
-		replayFrameIndex = replayFrameIndex + 1
+	Replay.replayTime = Replay.replayTime + dt
+	local sourceDuration = Replay.replaySourceEnd - Replay.replaySourceStart
+	local sourceT = Replay.replaySourceStart + math.min(sourceDuration, Replay.replayTime * (sourceDuration / Replay.replayDuration))
+	while Replay.replayFrameIndex < #Replay.replayFrames and Replay.replayFrames[Replay.replayFrameIndex + 1].t <= sourceT do
+		Replay.replayFrameIndex = Replay.replayFrameIndex + 1
 	end
-	local a = replayFrames[replayFrameIndex]
-	local b = replayFrames[math.min(replayFrameIndex + 1, #replayFrames)]
+	local a = Replay.replayFrames[Replay.replayFrameIndex]
+	local b = Replay.replayFrames[math.min(Replay.replayFrameIndex + 1, #Replay.replayFrames)]
 	local alpha = 0
 	if b.t > a.t then
 		alpha = clamp((sourceT - a.t) / (b.t - a.t), 0, 1)
@@ -3585,30 +3623,30 @@ local function replayStep(dt)
 	end
 	applyDirectionMarkers()
 
-	local left = math.max(0, replayDuration - replayTime)
-	replayTitle.Text = string.format("%s  •  %.1f c",
+	local left = math.max(0, Replay.replayDuration - Replay.replayTime)
+	UI.replayTitle.Text = string.format("%s  •  %.1f c",
 		replayTitleText(), left)
-	replayProgressFill.Size = UDim2.fromScale(clamp(replayTime / replayDuration, 0, 1), 1)
+	UI.replayProgressFill.Size = UDim2.fromScale(clamp(Replay.replayTime / Replay.replayDuration, 0, 1), 1)
 
-	if replayTime >= replayDuration then
+	if Replay.replayTime >= Replay.replayDuration then
 		endGoalReplay()
 	end
 end
 
 local function render()
-	playerChip.Position = fieldPosToUI(playerPos)
-	botChip.Position = fieldPosToUI(botPos)
-	if allyChip then
-		allyChip.Visible = isTeamMode
-		allyChip.Position = fieldPosToUI(allyActor.Pos)
+	UI.playerChip.Position = fieldPosToUI(playerPos)
+	UI.botChip.Position = fieldPosToUI(botPos)
+	if UI.allyChip then
+		UI.allyChip.Visible = isTeamMode
+		UI.allyChip.Position = fieldPosToUI(allyActor.Pos)
 	end
-	if enemy2Chip then
-		enemy2Chip.Visible = isTeamMode
-		enemy2Chip.Position = fieldPosToUI(enemy2Actor.Pos)
+	if UI.enemy2Chip then
+		UI.enemy2Chip.Visible = isTeamMode
+		UI.enemy2Chip.Position = fieldPosToUI(enemy2Actor.Pos)
 	end
-	ballFrame.Position = fieldPosToUI(ballPos)
-	if ballBody then
-		ballBody.Rotation = ballRotation % 360
+	UI.ballFrame.Position = fieldPosToUI(ballPos)
+	if UI.ballBody then
+		UI.ballBody.Rotation = ballRotation % 360
 	end
 	applyDirectionMarkers()
 end
@@ -3619,14 +3657,14 @@ local function chargeStep(dt)
 	end
 	chargePower = clamp(chargePower + dt / SETTINGS.CHARGE_TIME, 0, 1) -- полная сила за 1.8 сек
 	local shownPower = getEffectivePlayerPower(chargePower) -- и сама шкала растёт мягко, особенно в начале
-	powerBarFill.Size = UDim2.fromScale(shownPower, 1)
-	if powerPercentLabel then
-		powerPercentLabel.Text = tostring(math.floor(shownPower * 100 + 0.5)) .. "%"
+	UI.powerBarFill.Size = UDim2.fromScale(shownPower, 1)
+	if UI.powerPercentLabel then
+		UI.powerPercentLabel.Text = tostring(math.floor(shownPower * 100 + 0.5)) .. "%"
 	end
 	if shownPower < 0.5 then
-		powerBarFill.BackgroundColor3 = Color3.fromRGB(46, 204, 113):Lerp(COL.Yellow, shownPower * 2)
+		UI.powerBarFill.BackgroundColor3 = Color3.fromRGB(46, 204, 113):Lerp(COL.Yellow, shownPower * 2)
 	else
-		powerBarFill.BackgroundColor3 = COL.Yellow:Lerp(Color3.fromRGB(255, 59, 48), (shownPower - 0.5) * 2)
+		UI.powerBarFill.BackgroundColor3 = COL.Yellow:Lerp(Color3.fromRGB(255, 59, 48), (shownPower - 0.5) * 2)
 	end
 
 	-- Стрелка показывает ТОЧНУЮ линию центр фишки -> центр мяча.
@@ -3635,16 +3673,16 @@ local function chargeStep(dt)
 	local inKickRange = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH
 	if not inKickRange then
 		-- Мяч ещё не касается фишки: стрелки нет и рывка нет, шкала просто продолжает расти.
-		aimLine.Visible = false
+		UI.aimLine.Visible = false
 		return
 	end
 	from = ballPos
 	dir = getContactDirection(false) * 100
 	local effective = getEffectivePlayerPower(chargePower)
-	aimLine.Position = fieldPosToUI(from)
-	aimLine.Rotation = math.deg(math.atan(dir.Y, dir.X))
-	aimLine.Size = UDim2.new((55 + effective * 125) / FIELD_W, 0, 0, 5)
-	aimLine.Visible = true
+	UI.aimLine.Position = fieldPosToUI(from)
+	UI.aimLine.Rotation = math.deg(math.atan(dir.Y, dir.X))
+	UI.aimLine.Size = UDim2.new((55 + effective * 125) / FIELD_W, 0, 0, 5)
+	UI.aimLine.Visible = true
 end
 
 --================================================================================
@@ -3662,7 +3700,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			if state == "Replay" then
 				endGoalReplay()
 			elseif state == "Goal" then
-				replaySkipRequested = true
+				Replay.replaySkipRequested = true
 			elseif state == "Playing" then
 				-- Быстрый физический удар с пробела (бонус во время игры)
 				isCharging = true
@@ -3680,7 +3718,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			isCharging = true
 			chargeAimToGoal = false
 			chargePower = 0 -- сила всегда начинается с нуля и растёт медленно
-			powerBarBg.Visible = true
+			UI.powerBarBg.Visible = true
 		end
 	end
 
@@ -3724,62 +3762,62 @@ UserInputService.WindowFocusReleased:Connect(function()
 end)
 
 -- Кнопка УДАР (телефон): держишь — заряд, отпустил — физический удар от фишки через мяч
-kickButton.MouseButton1Down:Connect(function()
+UI.kickButton.MouseButton1Down:Connect(function()
 	if state == "Playing" then
 		isCharging = true
 		chargeAimToGoal = true
 		chargePower = 0
-		powerBarBg.Visible = true
+		UI.powerBarBg.Visible = true
 	end
 end)
-kickButton.MouseButton1Up:Connect(function()
+UI.kickButton.MouseButton1Up:Connect(function()
 	if isCharging and chargeAimToGoal then
 		releaseKick()
 	end
 end)
 
 -- Кнопки на игровом экране
-pauseButton.MouseButton1Click:Connect(function()
+UI.pauseButton.MouseButton1Click:Connect(function()
 	if state == "Playing" then
 		togglePause(true)
 	end
 end)
-cameraGameButton.MouseButton1Click:Connect(function()
+UI.cameraGameButton.MouseButton1Click:Connect(function()
 	cameraMode = (cameraMode == "Full") and "Close" or "Full"
 	cancelCharge()
 	if cameraMode == "Close" then
 		cameraCenter = playerPos * 0.78 + ballPos * 0.22
 	end
-	refreshCameraButtons()
+	UI.refreshCameraButtons()
 	updateFieldCamera(1)
 end)
-replaySkipButton.MouseButton1Click:Connect(function()
+UI.replaySkipButton.MouseButton1Click:Connect(function()
 	if state == "Replay" then
 		endGoalReplay()
 	elseif state == "Goal" then
-		replaySkipRequested = true
+		Replay.replaySkipRequested = true
 	end
 end)
-quitToMenuButton.MouseButton1Click:Connect(function()
+UI.quitToMenuButton.MouseButton1Click:Connect(function()
 	goToMenu()
 end)
-resumeButton.MouseButton1Click:Connect(function()
+UI.resumeButton.MouseButton1Click:Connect(function()
 	if state == "Paused" then
 		togglePause(false)
 	end
 end)
-restartButtonP.MouseButton1Click:Connect(function()
-	pauseOverlay.Visible = false
+UI.restartButtonP.MouseButton1Click:Connect(function()
+	UI.pauseOverlay.Visible = false
 	startMatch()
 end)
-menuButtonP.MouseButton1Click:Connect(function()
+UI.menuButtonP.MouseButton1Click:Connect(function()
 	goToMenu()
 end)
-rematchButton.MouseButton1Click:Connect(function()
-	finishOverlay.Visible = false
+UI.rematchButton.MouseButton1Click:Connect(function()
+	UI.finishOverlay.Visible = false
 	startMatch()
 end)
-menuButtonF.MouseButton1Click:Connect(function()
+UI.menuButtonF.MouseButton1Click:Connect(function()
 	goToMenu()
 end)
 
@@ -3795,12 +3833,12 @@ RunService.RenderStepped:Connect(function(dt)
 		dt = 1 / 30
 	end
 
-	if menuFrame.Visible and rainbowGradient then
-		rainbowGradient.Offset = Vector2.new((os.clock() * 0.20) % 1, 0)
-		rainbowGradient.Rotation = math.sin(os.clock() * 0.7) * 6
+	if UI.menuFrame.Visible and UI.rainbowGradient then
+		UI.rainbowGradient.Offset = Vector2.new((os.clock() * 0.20) % 1, 0)
+		UI.rainbowGradient.Rotation = math.sin(os.clock() * 0.7) * 6
 	end
 
-	if not gameFrame.Visible then
+	if not UI.gameFrame.Visible then
 		return
 	end
 
@@ -3828,4 +3866,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.6 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
+print("[ROBALL] Часть 1 v1.6.1 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
