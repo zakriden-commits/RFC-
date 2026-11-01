@@ -1,7 +1,16 @@
 --[[
 ================================================================================
-  ⚽ RFC FOOTBALL 2D — ЧАСТЬ 1 (МЕНЮ + Матч 1 на 1 С БОТОМ)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.1 (МЕНЮ + Матч 1 на 1 С БОТОМ)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
+
+  ЧТО ИСПРАВЛЕНО В 1.1:
+  • Лобби полностью отдельное и ровное: в меню НЕТ поля, ничего не налезает друг на друга
+  • Название ROBALL светится радугой сверху лобби
+  • Поле стало больше; в настройках камеры: «ВСЁ ПОЛЕ» или «ТОЛЬКО Я» (крупный план)
+  • Мяч тяжелее: не летает как воздух, быстрее останавливается, спокойнее ведётся
+  • Тихие лёгкие звуки ударов + аплодисменты при голе
+  • Перед матчем и после КАЖДОГО гола: все на своих местах + отсчёт 3-2-1
+  • Удар ЛКМ работает, если мяч рядом (в нескольких сантиметрах от фишки на поле)
 ================================================================================
 
   ЧТО ВНУТРИ:
@@ -12,7 +21,7 @@
   • Удар на ЛКМ: держишь — заряжается сила, отпускаешь — мяч летит в сторону курсора
   • Умный ИИ бота: атакует, защищается, выбивает мяч, бьёт по углам ворот
   • Матч до 3 голов, время матча — 2 минуты (ничья по времени = золотой гол)
-  • Небольшое уютное поле, табло, таймер, пауза, экран конца матча, реванш
+  • Большое поле с видом «всё поле / только я», табло, пауза, конец матча, реванш
   • Поддержка телефона: веди фишку пальцем по полю + кнопка «УДАР»
 
 --------------------------------------------------------------------------------
@@ -50,6 +59,7 @@ local Players           = game:GetService("Players")
 local UserInputService  = game:GetService("UserInputService")
 local RunService        = game:GetService("RunService")
 local TweenService      = game:GetService("TweenService")
+local GuiService        = game:GetService("GuiService")
 local SoundService      = game:GetService("SoundService")
 local Debris            = game:GetService("Debris")
 
@@ -57,10 +67,12 @@ local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local rng       = Random.new()
 
--- Удаляем старую копию GUI, если скрипт перезапустился (респавн / повторный Play)
-local oldGui = playerGui:FindFirstChild("RFC_Football2D_GUI")
-if oldGui then
-	oldGui:Destroy()
+-- Удаляем старые копии GUI (и новой, и прошлой версии), если скрипт перезапустился
+for _, guiName in ipairs({ "ROBALL_GUI", "RFC_Football2D_GUI" }) do
+	local oldGui = playerGui:FindFirstChild(guiName)
+	if oldGui then
+		oldGui:Destroy()
+	end
 end
 
 --// Настройки игры (можешь крутить под себя) \\--
@@ -77,6 +89,8 @@ local GOAL_Y1, GOAL_Y2 = 210, 390        -- проём ворот по верт�
 local GOAL_CENTER_Y    = 300
 local PLAYER_R = 27                      -- радиус фишек
 local BALL_R   = 13                      -- радиус мяча
+local PLAYER_KICK_REACH = 62             -- насколько мяч может быть НЕ вплотную, но удар ЛКМ всё равно достанет
+local BOT_KICK_REACH = 16                -- бот бьёт только почти вплотную, честно
 local POSTS = {                          -- штанги
 	Vector2.new(0, GOAL_Y1), Vector2.new(0, GOAL_Y2),
 	Vector2.new(FIELD_W, GOAL_Y1), Vector2.new(FIELD_W, GOAL_Y2),
@@ -85,19 +99,19 @@ local POSTS = {                          -- штанги
 --// Сложности бота \\--
 local DIFFICULTIES = {
 	Easy = {
-		Title = "😊 ЛЁГКИЙ", Color = Color3.fromRGB(76, 217, 100),
+		Title = "😊 ЛЁГКИЙ", ButtonText = "ЛЁГКИЙ", Color = Color3.fromRGB(76, 217, 100),
 		Speed = 228, Reaction = 0.50, KickPower = 480, KickCooldown = 1.50,
 		AimError = 26, Predict = 0.00, Aggression = 0.30, ShootX = 300,
 		Description = "Бот медленный и часто ошибается. Для разминки.",
 	},
 	Medium = {
-		Title = "⚔️ СРЕДНИЙ", Color = Color3.fromRGB(255, 204, 0),
+		Title = "⚔️ СРЕДНИЙ", ButtonText = "СРЕДНИЙ", Color = Color3.fromRGB(255, 204, 0),
 		Speed = 298, Reaction = 0.28, KickPower = 650, KickCooldown = 1.00,
 		AimError = 14, Predict = 0.35, Aggression = 0.60, ShootX = 400,
 		Description = "Бот борется, защищается и бьёт по углам.",
 	},
 	Hard = {
-		Title = "🔥 СЛОЖНЫЙ", Color = Color3.fromRGB(255, 59, 48),
+		Title = "🔥 СЛОЖНЫЙ", ButtonText = "СЛОЖНЫЙ", Color = Color3.fromRGB(255, 59, 48),
 		Speed = 368, Reaction = 0.12, KickPower = 830, KickCooldown = 0.65,
 		AimError = 6, Predict = 0.70, Aggression = 0.85, ShootX = 485,
 		Description = "Предвидит мяч, быстрый и точный. Удачи.",
@@ -124,6 +138,8 @@ local COL = {
 local state = "Menu"            -- Menu / Countdown / Playing / Goal / Paused / Finished
 local selectedDiffKey = "Medium"
 local currentDiff = DIFFICULTIES.Medium
+local cameraMode = "Full"               -- Full = видно всё поле; Close = крупный план за игроком
+local cameraCenter = Vector2.new(FIELD_W / 2, FIELD_H / 2)
 
 local playerPos = Vector2.new(200, 300)
 local playerVel = Vector2.new(0, 0)
@@ -159,9 +175,10 @@ local screenGui, menuFrame, gameFrame, fieldFrame
 local playerChip, botChip, ballFrame, aimLine
 local scoreLeftLabel, scoreRightLabel, timerLabel, diffBadgeLabel
 local powerBarBg, powerBarFill, countdownLabel, goalBanner, toastLabel
-local pauseOverlay, finishOverlay, finishTitle, finishScore, finishStats, menuBall
-local diffDescLabel
+local pauseOverlay, finishOverlay, finishTitle, finishScore, finishStats
+local diffDescLabel, cameraDescLabel, cameraGameButton, rainbowGradient
 local diffButtons = {}
+local cameraButtons = {}
 
 --// Маленькие помощники \\--
 local function clamp(v, a, b)
@@ -237,7 +254,7 @@ local function makeText(parent, props)
 end
 
 -- Безопасные звуки: если какого-то файла в игре нет — просто тишина, игра не ломается
-local function playSfx(assetId, volume, pitch)
+local function playSfx(assetId, volume, pitch, life)
 	local ok = pcall(function()
 		local s = Instance.new("Sound")
 		s.SoundId = assetId
@@ -245,14 +262,16 @@ local function playSfx(assetId, volume, pitch)
 		s.PlaybackSpeed = pitch or 1
 		s.Parent = SoundService
 		s:Play()
-		Debris:AddItem(s, 2)
+		Debris:AddItem(s, life or 2)
 	end)
 	return ok
 end
 local SFX = {
-	Click  = "rbxasset://sounds/clickfast.wav",
-	Kick   = "rbxasset://sounds/collide.wav",
-	Bounce = "rbxasset://sounds/collide.wav",
+	-- Тихие и лёгкие звуки. Если какого-то нет в твоей игре — просто будет тишина.
+	Click    = "rbxasset://sounds/clickfast.wav",
+	Kick     = "rbxasset://sounds/collide.wav",
+	Bounce   = "rbxasset://sounds/collide.wav",
+	Applause = "rbxassetid://2397585192", -- аплодисменты/радость трибун при голе
 }
 
 local function makeButton(parent, props)
@@ -278,7 +297,7 @@ local function makeButton(parent, props)
 		TweenService:Create(scale, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 	end)
 	btn.MouseButton1Click:Connect(function()
-		playSfx(SFX.Click, 0.4, 1)
+		playSfx(SFX.Click, 0.12, 1.15)
 	end)
 	return btn
 end
@@ -314,6 +333,12 @@ local function screenToField(screenPos)
 end
 
 local function isScreenPosInsideField(screenPos)
+	-- В крупном плане поле увеличено и частично за кадром: удар принимаем по всей
+	-- игровой зоне ниже верхней панели (сама панель с кнопками не трогается).
+	if cameraMode == "Close" then
+		local gs = gameFrame.AbsoluteSize
+		return screenPos.Y > gs.Y * 0.108 and screenPos.Y < gs.Y * 0.99
+	end
 	local ap = fieldFrame.AbsolutePosition
 	local as = fieldFrame.AbsoluteSize
 	return screenPos.X >= ap.X and screenPos.X <= ap.X + as.X
@@ -354,7 +379,7 @@ end
 --  СТРОИМ ИНТЕРФЕЙС
 --================================================================================
 screenGui = create("ScreenGui", {
-	Name = "RFC_Football2D_GUI",
+	Name = "ROBALL_GUI",
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
 	DisplayOrder = 10,
@@ -373,97 +398,59 @@ menuFrame = create("Frame", {
 }, screenGui)
 addGradient(menuFrame, Color3.fromRGB(8, 32, 22), Color3.fromRGB(5, 12, 26), 90)
 
--- «Газон» внизу меню: полосы поля
-local menuGround = create("Frame", {
-	Name = "Ground",
-	AnchorPoint = Vector2.new(0.5, 1),
-	Position = UDim2.fromScale(0.5, 1),
-	Size = UDim2.fromScale(1, 0.30),
-	BackgroundColor3 = COL.FieldA,
-	BorderSizePixel = 0,
-	ZIndex = 1,
-}, menuFrame)
-addGradient(menuGround, COL.FieldA, COL.FieldB, 90)
-for i = 0, 9 do
-	create("Frame", {
-		Position = UDim2.fromScale(i / 10, 0),
-		Size = UDim2.fromScale(1 / 10, 1),
-		BackgroundColor3 = COL.White,
-		BackgroundTransparency = (i % 2 == 0) and 0.94 or 1,
-		BorderSizePixel = 0,
-		ZIndex = 1,
-	}, menuGround)
-end
--- Белая линия газона и центральный круг для красоты
-create("Frame", {
-	Position = UDim2.fromScale(0, 0),
-	Size = UDim2.new(1, 0, 0, 4),
-	BackgroundColor3 = COL.White,
-	BackgroundTransparency = 0.25,
-	BorderSizePixel = 0,
-	ZIndex = 2,
-}, menuGround)
-local menuCircle = create("Frame", {
-	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0),
-	Size = UDim2.new(0, 260, 0, 130),
-	BackgroundTransparency = 1,
-	BorderSizePixel = 0,
-	ZIndex = 2,
-}, menuGround)
-addCorner(menuCircle, 1, 0)
-addStroke(menuCircle, COL.White, 3, 0.4)
-
--- Большой вращающийся мяч (рисуем кружками — картинки не нужны)
-menuBall = create("Frame", {
-	Name = "BigBall",
-	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(0.845, 0.26),
-	Size = UDim2.fromScale(0.17, 0.17),
-	BackgroundColor3 = COL.White,
-	BorderSizePixel = 0,
-	ZIndex = 2,
-}, menuFrame)
-addCorner(menuBall, 1, 0)
-addStroke(menuBall, COL.Black, 4, 0)
-local menuBallRatio = Instance.new("UIAspectRatioConstraint")
-menuBallRatio.AspectRatio = 1
-menuBallRatio.Parent = menuBall
-local ballDotPositions = { {0.5, 0.5, 0.30}, {0.22, 0.28, 0.18}, {0.78, 0.30, 0.18}, {0.30, 0.75, 0.18}, {0.72, 0.74, 0.18} }
-for _, d in ipairs(ballDotPositions) do
-	local dot = create("Frame", {
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(d[1], d[2]),
-		Size = UDim2.fromScale(d[3], d[3]),
-		BackgroundColor3 = COL.Black,
-		BorderSizePixel = 0,
-		ZIndex = 3,
-	}, menuBall)
-	addCorner(dot, 1, 0)
+-- ЛОББИ СПЕЦИАЛЬНО БЕЗ ПОЛЯ И БЕЗ лишних картинок:
+-- только ровные отдельные ряды, ничего не залезает одно на другое.
+local function addRainbowGradient(obj)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 45, 45)),
+		ColorSequenceKeypoint.new(0.16, Color3.fromRGB(255, 150, 20)),
+		ColorSequenceKeypoint.new(0.33, Color3.fromRGB(255, 235, 40)),
+		ColorSequenceKeypoint.new(0.50, Color3.fromRGB(55, 230, 100)),
+		ColorSequenceKeypoint.new(0.66, Color3.fromRGB(35, 170, 255)),
+		ColorSequenceKeypoint.new(0.83, Color3.fromRGB(170, 80, 255)),
+		ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 45, 120)),
+	})
+	g.Rotation = 0
+	g.Parent = obj
+	return g
 end
 
--- Заголовок
+-- Название игры: ROBALL радугой и со свечением
 local titleLabel = makeText(menuFrame, {
 	Name = "Title",
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.035),
-	Size = UDim2.fromScale(0.94, 0.16),
-	Text = "⚽ RFC FOOTBALL 2D",
+	Position = UDim2.fromScale(0.5, 0.028),
+	Size = UDim2.fromScale(0.56, 0.145),
+	Text = "ROBALL",
 	Font = Enum.Font.GothamBlack,
-	TextSize = 64,
+	TextSize = 80,
 	TextScaled = true,
 	TextColor3 = COL.White,
-	TextStrokeColor3 = Color3.fromRGB(0, 60, 30),
-	TextStrokeTransparency = 0.35,
+	TextStrokeColor3 = Color3.fromRGB(255, 255, 255),
+	TextStrokeTransparency = 0.55,
 	ZIndex = 5,
 })
-create("UITextSizeConstraint", { MaxTextSize = 72 }, titleLabel)
+create("UITextSizeConstraint", { MaxTextSize = 88 }, titleLabel)
+rainbowGradient = addRainbowGradient(titleLabel)
+
+-- Тонкая радужная светящаяся линия под названием (отдельный ряд, не касается текста)
+local titleLine = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.178),
+	Size = UDim2.fromScale(0.34, 0.008),
+	BackgroundColor3 = COL.White,
+	BorderSizePixel = 0,
+	ZIndex = 5,
+}, menuFrame)
+addCorner(titleLine, 1, 0)
+addRainbowGradient(titleLine)
 
 makeText(menuFrame, {
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.185),
-	Size = UDim2.fromScale(0.9, 0.05),
-	Text = "МАТЧ 1 на 1 ПРОТИВ КОМПЬЮТЕРА  •  ДО 3 ГОЛОВ  •  2 МИНУТЫ",
+	Position = UDim2.fromScale(0.5, 0.198),
+	Size = UDim2.fromScale(0.82, 0.042),
+	Text = "2D ФУТБОЛ  •  1 НА 1  •  ДО 3 ГОЛОВ  •  2 МИНУТЫ",
 	Font = Enum.Font.GothamBold,
 	TextSize = 20,
 	TextScaled = true,
@@ -471,61 +458,64 @@ makeText(menuFrame, {
 	ZIndex = 5,
 })
 
--- Центральная панель
+-- Центральная панель: каждая вещь на своём ряду с отступами.
 local menuPanel = create("Frame", {
 	Name = "Panel",
 	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(0.5, 0.47),
-	Size = UDim2.fromScale(0.46, 0.42),
+	Position = UDim2.fromScale(0.5, 0.568),
+	Size = UDim2.fromScale(0.48, 0.575),
 	BackgroundColor3 = COL.Panel,
-	BackgroundTransparency = 0.12,
+	BackgroundTransparency = 0.08,
 	BorderSizePixel = 0,
 	ZIndex = 5,
 }, menuFrame)
 addCorner(menuPanel, 0, 18)
 addStroke(menuPanel, COL.White, 2, 0.75)
 
--- БОЛЬШАЯ кнопка «ИГРАТЬ»
+-- Ряд 1: БОЛЬШАЯ кнопка «ИГРАТЬ»
 local playButton = makeButton(menuPanel, {
 	Name = "PlayButton",
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.07),
-	Size = UDim2.fromScale(0.84, 0.24),
+	Position = UDim2.fromScale(0.5, 0.04),
+	Size = UDim2.fromScale(0.86, 0.145),
 	BackgroundColor3 = COL.GreenBtn,
 	Text = "▶  ИГРАТЬ 1 на 1",
 	Font = Enum.Font.GothamBlack,
 	TextSize = 34,
 	TextScaled = true,
+	TextWrapped = false,
 	ZIndex = 6,
 })
 addCorner(playButton, 0, 16)
 addStroke(playButton, COL.White, 2, 0.4)
 
+-- Ряд 2: сложность бота
 makeText(menuPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.37),
-	Size = UDim2.fromScale(0.9, 0.09),
-	Text = "СЛОЖНОСТЬ БОТА:",
+	Position = UDim2.fromScale(0.5, 0.215),
+	Size = UDim2.fromScale(0.9, 0.055),
+	Text = "СЛОЖНОСТЬ БОТА",
 	TextSize = 18,
 	TextScaled = true,
 	TextColor3 = Color3.fromRGB(190, 205, 220),
 	ZIndex = 6,
 })
 
--- Кнопки сложности
 for i, key in ipairs(DIFF_ORDER) do
 	local d = DIFFICULTIES[key]
 	local btn = makeButton(menuPanel, {
 		Name = "Diff_" .. key,
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.fromScale(0.19 + (i - 1) * 0.31, 0.48),
-		Size = UDim2.fromScale(0.28, 0.17),
+		Position = UDim2.fromScale(0.19 + (i - 1) * 0.31, 0.285),
+		Size = UDim2.fromScale(0.28, 0.105),
 		BackgroundColor3 = COL.GreyBtn,
-		Text = d.Title,
-		TextSize = 17,
+		Text = d.ButtonText,
+		TextSize = 20,
 		TextScaled = true,
+		TextWrapped = false,
 		ZIndex = 6,
 	})
+	create("UITextSizeConstraint", { MaxTextSize = 22 }, btn)
 	addCorner(btn, 0, 12)
 	local stroke = addStroke(btn, COL.White, 3, 1)
 	diffButtons[key] = { Button = btn, Stroke = stroke }
@@ -533,8 +523,8 @@ end
 
 diffDescLabel = makeText(menuPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.69),
-	Size = UDim2.fromScale(0.9, 0.12),
+	Position = UDim2.fromScale(0.5, 0.405),
+	Size = UDim2.fromScale(0.9, 0.07),
 	Text = "",
 	TextSize = 16,
 	TextScaled = true,
@@ -543,14 +533,110 @@ diffDescLabel = makeText(menuPanel, {
 	ZIndex = 6,
 })
 
+-- Тонкий разделитель между сложностью и настройками
+create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.49),
+	Size = UDim2.new(0.84, 0, 0, 2),
+	BackgroundColor3 = COL.White,
+	BackgroundTransparency = 0.78,
+	BorderSizePixel = 0,
+	ZIndex = 6,
+}, menuPanel)
+
+-- Ряд 3: НАСТРОЙКИ КАМЕРЫ
 makeText(menuPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.84),
-	Size = UDim2.fromScale(0.92, 0.13),
+	Position = UDim2.fromScale(0.5, 0.512),
+	Size = UDim2.fromScale(0.9, 0.055),
+	Text = "⚙ НАСТРОЙКИ — ВИД ПОЛЯ",
+	TextSize = 18,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(190, 205, 220),
+	ZIndex = 6,
+})
+
+local function refreshCameraButtons()
+	for key, info in pairs(cameraButtons) do
+		if key == cameraMode then
+			info.Button.BackgroundColor3 = COL.Player
+			info.Stroke.Transparency = 0
+		else
+			info.Button.BackgroundColor3 = COL.GreyBtn
+			info.Stroke.Transparency = 1
+		end
+	end
+	if cameraDescLabel then
+		cameraDescLabel.Text = (cameraMode == "Full")
+			and "Видно всё поле целиком."
+			or "Камера следит за тобой: видно тебя и ближайшую часть поля."
+	end
+	if cameraGameButton then
+		cameraGameButton.Text = (cameraMode == "Full") and "ВИД: ВСЁ ПОЛЕ" or "ВИД: ТОЛЬКО Я"
+	end
+end
+
+local cameraOptions = {
+	{ Key = "Full", Text = "ВСЁ ПОЛЕ" },
+	{ Key = "Close", Text = "ТОЛЬКО Я" },
+}
+for i, option in ipairs(cameraOptions) do
+	local btn = makeButton(menuPanel, {
+		Name = "Camera_" .. option.Key,
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.fromScale(0.275 + (i - 1) * 0.45, 0.582),
+		Size = UDim2.fromScale(0.41, 0.105),
+		BackgroundColor3 = COL.GreyBtn,
+		Text = option.Text,
+		TextSize = 20,
+		TextScaled = true,
+		TextWrapped = false,
+		ZIndex = 6,
+	})
+	create("UITextSizeConstraint", { MaxTextSize = 22 }, btn)
+	addCorner(btn, 0, 12)
+	local stroke = addStroke(btn, COL.White, 3, 1)
+	cameraButtons[option.Key] = { Button = btn, Stroke = stroke }
+	btn.MouseButton1Click:Connect(function()
+		cameraMode = option.Key
+		refreshCameraButtons()
+	end)
+end
+
+cameraDescLabel = makeText(menuPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.703),
+	Size = UDim2.fromScale(0.92, 0.072),
+	Text = "",
+	TextSize = 15,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(200, 212, 226),
+	TextWrapped = true,
+	ZIndex = 6,
+})
+refreshCameraButtons()
+
+-- Ряд 4: короткая подсказка, отдельно от всех кнопок
+makeText(menuPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.795),
+	Size = UDim2.fromScale(0.92, 0.075),
 	Text = "Твоя фишка — СИНЯЯ слева. Атакуй КРАСНЫЕ ворота справа!",
 	TextSize = 16,
 	TextScaled = true,
 	TextColor3 = COL.Yellow,
+	TextWrapped = true,
+	ZIndex = 6,
+})
+
+makeText(menuPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.895),
+	Size = UDim2.fromScale(0.92, 0.065),
+	Text = "После каждого гола все возвращаются на места: отсчёт 3-2-1.",
+	TextSize = 14,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextWrapped = true,
 	ZIndex = 6,
 })
@@ -591,7 +677,7 @@ end
 makeText(menuFrame, {
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.fromScale(0.5, 0.985),
-	Size = UDim2.fromScale(0.96, 0.055),
+	Size = UDim2.fromScale(0.92, 0.045),
 	Text = controlsText,
 	TextSize = 17,
 	TextScaled = true,
@@ -604,7 +690,7 @@ makeText(menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1",
+	Text = "ROBALL • ЧАСТЬ 1 • v1.1",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -674,8 +760,8 @@ scoreRightLabel = makeText(scoreBoard, {
 
 diffBadgeLabel = makeText(gameFrame, {
 	AnchorPoint = Vector2.new(0, 0),
-	Position = UDim2.fromScale(0.012, 0.02),
-	Size = UDim2.fromScale(0.20, 0.045),
+	Position = UDim2.fromScale(0.012, 0.014),
+	Size = UDim2.fromScale(0.185, 0.037),
 	Text = "БОТ: СРЕДНИЙ",
 	TextSize = 16,
 	TextScaled = true,
@@ -683,6 +769,23 @@ diffBadgeLabel = makeText(gameFrame, {
 	TextXAlignment = Enum.TextXAlignment.Left,
 	ZIndex = 20,
 })
+
+-- Кнопка вида прямо в матче: тот же выбор, что в настройках лобби.
+cameraGameButton = makeButton(gameFrame, {
+	Name = "CameraToggleButton",
+	AnchorPoint = Vector2.new(0, 0),
+	Position = UDim2.fromScale(0.012, 0.057),
+	Size = UDim2.fromScale(0.185, 0.044),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "ВИД: ВСЁ ПОЛЕ",
+	TextSize = 15,
+	TextScaled = true,
+	TextWrapped = false,
+	ZIndex = 25,
+})
+addCorner(cameraGameButton, 0, 10)
+addStroke(cameraGameButton, COL.White, 1, 0.65)
+refreshCameraButtons()
 
 toastLabel = makeText(gameFrame, {
 	AnchorPoint = Vector2.new(0.5, 0),
@@ -725,12 +828,13 @@ local quitToMenuButton = makeButton(gameFrame, {
 })
 addCorner(quitToMenuButton, 0, 10)
 
--- Само поле (небольшое, аккуратное, по центру)
+-- Само поле. Его точный пиксельный размер и позицию каждый frame ставит
+-- updateFieldCamera(): поле стало больше и поддерживает крупный план за игроком.
 fieldFrame = create("Frame", {
 	Name = "Field",
-	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(0.5, 0.535),
-	Size = UDim2.fromScale(0.90, 0.76),
+	AnchorPoint = Vector2.new(0, 0),
+	Position = UDim2.fromOffset(20, 95),
+	Size = UDim2.fromOffset(1000, 600),
 	BackgroundColor3 = COL.FieldA,
 	BorderSizePixel = 0,
 	ClipsDescendants = false,
@@ -738,9 +842,6 @@ fieldFrame = create("Frame", {
 }, gameFrame)
 addGradient(fieldFrame, Color3.fromRGB(44, 165, 74), Color3.fromRGB(30, 128, 56), 0)
 addStroke(fieldFrame, COL.White, 3, 0.1)
-local fieldRatio = Instance.new("UIAspectRatioConstraint")
-fieldRatio.AspectRatio = FIELD_W / FIELD_H
-fieldRatio.Parent = fieldFrame
 
 -- Полосы газона
 for i = 0, 9 do
@@ -943,7 +1044,7 @@ powerBarBg = create("Frame", {
 	Name = "PowerBar",
 	AnchorPoint = Vector2.new(0.5, 1),
 	Position = UDim2.fromScale(0.5, 0.985),
-	Size = UDim2.fromScale(0.30, 0.024),
+	Size = UDim2.fromScale(0.26, 0.024),
 	BackgroundColor3 = Color3.fromRGB(20, 26, 34),
 	BorderSizePixel = 0,
 	Visible = false,
@@ -962,7 +1063,7 @@ addCorner(powerBarFill, 1, 0)
 makeText(gameFrame, {
 	AnchorPoint = Vector2.new(0, 1),
 	Position = UDim2.fromScale(0.012, 0.99),
-	Size = UDim2.fromScale(0.34, 0.04),
+	Size = UDim2.fromScale(0.31, 0.04),
 	Text = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 		and "📱 Палец по полю — движение • УДАР — по воротам"
 		or "🎮 WASD — движение • ЛКМ — удар • Shift — спринт",
@@ -1216,6 +1317,11 @@ function resetKickoff(kickoffTeam)
 		playerPos = Vector2.new(210, 300)
 		botPos = Vector2.new(575, 300)
 	end
+	if cameraMode == "Close" then
+		cameraCenter = playerPos * 0.78 + ballPos * 0.22
+	else
+		cameraCenter = Vector2.new(FIELD_W / 2, FIELD_H / 2)
+	end
 	botTargetPos = botPos
 	botThinkTimer = 0
 	botKickCooldown = 0.6
@@ -1232,12 +1338,14 @@ function startCountdown()
 		for i = 3, 1, -1 do
 			if matchToken ~= my then return end
 			countdownLabel.Text = tostring(i)
+			playSfx(SFX.Click, 0.08, 0.85 + (3 - i) * 0.18)
 			countdownScale.Scale = 1.5
 			TweenService:Create(countdownScale, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 			task.wait(0.65)
 		end
 		if matchToken ~= my then return end
 		countdownLabel.Text = "⚽ ИГРА!"
+		playSfx(SFX.Click, 0.10, 1.35)
 		countdownScale.Scale = 1.4
 		TweenService:Create(countdownScale, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 		state = "Playing"
@@ -1366,7 +1474,7 @@ function onGoal(scorer) -- scorer: "player" или "Bot"
 	goalBanner.Visible = true
 	goalBannerScale.Scale = 0.4
 	TweenService:Create(goalBannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
-	playSfx(SFX.Kick, 0.6, 1.4)
+	playSfx(SFX.Applause, (scorer == "player") and 0.26 or 0.15, 1, 3)
 	if scorer == "player" then
 		spawnConfetti()
 	end
@@ -1390,7 +1498,8 @@ local function kickBall(isBot, aimPoint, power01)
 	local chipPos = isBot and botPos or playerPos
 	local chipVel = isBot and botVel or playerVel
 	local toBall = ballPos - chipPos
-	if toBall.Magnitude > PLAYER_R + BALL_R + 30 then
+	local reach = PLAYER_R + BALL_R + (isBot and BOT_KICK_REACH or PLAYER_KICK_REACH)
+	if toBall.Magnitude > reach then
 		return false
 	end
 	local dir = unit2(aimPoint - ballPos)
@@ -1400,9 +1509,9 @@ local function kickBall(isBot, aimPoint, power01)
 	local p = clamp(power01, 0, 1)
 	local speed
 	if isBot then
-		speed = 260 + p * currentDiff.KickPower
+		speed = 240 + p * currentDiff.KickPower
 	else
-		speed = 300 + p * 820
+		speed = 280 + p * 760
 	end
 	ballVel = dir * speed + chipVel * 0.15
 	if isBot then
@@ -1410,7 +1519,7 @@ local function kickBall(isBot, aimPoint, power01)
 	else
 		shotsPlayer = shotsPlayer + 1
 	end
-	playSfx(SFX.Kick, 0.35 + p * 0.35, 0.9 + p * 0.4)
+	playSfx(SFX.Kick, 0.05 + p * 0.12, 0.75 + p * 0.25)
 	-- Мяч чуть «пульсирует» от удара
 	task.spawn(function()
 		ballFrame.Size = fieldSizeToUI(BALL_R * 2 * 1.3, BALL_R * 2 * 1.3)
@@ -1426,7 +1535,7 @@ local function releaseKick()
 		cancelCharge()
 		return
 	end
-	local power = math.max(chargePower, 0.15)
+	local power = math.max(chargePower, 0.25) -- быстрый клик тоже нормально бьёт
 	local aim
 	if chargeAimToGoal then
 		-- Телефонная кнопка: бьём по углу ворот бота, дальнему от самого бота
@@ -1514,7 +1623,7 @@ local function botStep(dt)
 	)
 
 	-- Решение об ударе
-	if botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + 16 then
+	if botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
 		local aim, power
 		if ballPos.X > 820 then
 			-- Опасно у своих ворот — вынос на фланг, подальше от игрока
@@ -1610,12 +1719,7 @@ local function collideBallWithChip(chipPos, chipVel)
 		local chipSpeedAlong = chipVel:Dot(n)
 		local ballSpeedAlong = ballVel:Dot(n)
 		if ballSpeedAlong < chipSpeedAlong then
-			ballVel = ballVel + n * ((chipSpeedAlong - ballSpeedAlong) * 1.18)
-		end
-		-- Не даём мячу от простого ведения улететь как от удара
-		if ballVel.Magnitude > 560 and (ballPos - chipPos).Magnitude <= minDist + 2 then
-			-- (скорость после УДАРА не режем: удар сразу задаёт большую скорость
-			--  и мяч быстро выходит из зоны minDist+2)
+			ballVel = ballVel + n * ((chipSpeedAlong - ballSpeedAlong) * 0.92) -- мяч тяжёлый: ведение не выстреливает им
 		end
 	end
 end
@@ -1632,12 +1736,12 @@ local function ballStep(dt)
 		collideBallWithChip(botPos, botVel)
 
 		ballPos = ballPos + ballVel * sdt
-		ballVel = ballVel * math.pow(0.55, sdt) -- трение о газон
-		if ballVel.Magnitude < 6 then
+		ballVel = ballVel * math.pow(0.34, sdt) -- сильное трение: мяч тяжёлый и быстро останавливается
+		if ballVel.Magnitude < 10 then
 			ballVel = Vector2.new(0, 0)
 		end
-		if ballVel.Magnitude > 1200 then
-			ballVel = unit2(ballVel) * 1200
+		if ballVel.Magnitude > 1100 then
+			ballVel = unit2(ballVel) * 1100
 		end
 
 		-- Штанги
@@ -1650,8 +1754,8 @@ local function ballStep(dt)
 				ballPos = post + n * minDist
 				local vn = ballVel:Dot(n)
 				if vn < 0 then
-					ballVel = (ballVel - n * (2 * vn)) * 0.75
-					playSfx(SFX.Bounce, 0.3, 1.6)
+					ballVel = (ballVel - n * (2 * vn)) * 0.62
+					playSfx(SFX.Bounce, 0.04, 1.15)
 				end
 			end
 		end
@@ -1659,10 +1763,10 @@ local function ballStep(dt)
 		-- Верхний и нижний бортики
 		if ballPos.Y < BALL_R then
 			ballPos = Vector2.new(ballPos.X, BALL_R)
-			ballVel = Vector2.new(ballVel.X, math.abs(ballVel.Y) * 0.78)
+			ballVel = Vector2.new(ballVel.X, math.abs(ballVel.Y) * 0.62)
 		elseif ballPos.Y > FIELD_H - BALL_R then
 			ballPos = Vector2.new(ballPos.X, FIELD_H - BALL_R)
-			ballVel = Vector2.new(ballVel.X, -math.abs(ballVel.Y) * 0.78)
+			ballVel = Vector2.new(ballVel.X, -math.abs(ballVel.Y) * 0.62)
 		end
 
 		-- Левые ворота (игрока) / левая стенка
@@ -1731,11 +1835,65 @@ end
 -- Во время баннера «ГОЛ» мяч просто докатывается в сетке
 local function ballSettleStep(dt)
 	ballPos = ballPos + ballVel * dt
-	ballVel = ballVel * math.pow(0.25, dt)
+	ballVel = ballVel * math.pow(0.18, dt)
 	ballPos = Vector2.new(
 		clamp(ballPos.X, -36, FIELD_W + 36),
 		clamp(ballPos.Y, BALL_R, FIELD_H - BALL_R)
 	)
+end
+
+-- Камера поля: Full помещает ВСЁ большое поле в отведённую зону,
+-- Close увеличивает поле в 1.7 раза и плавно следит за игроком (чуть-чуть за мячом).
+local function updateFieldCamera(dt)
+	if not gameFrame or not fieldFrame then
+		return
+	end
+	local viewport = gameFrame.AbsoluteSize
+	if viewport.X < 50 or viewport.Y < 50 then
+		return
+	end
+
+	local availW = viewport.X * 0.92
+	local availH = viewport.Y * 0.82
+	local areaCenter = Vector2.new(viewport.X * 0.5, viewport.Y * 0.53)
+	local ratio = FIELD_W / FIELD_H
+	local fitW, fitH
+	if availW / availH > ratio then
+		fitH = availH
+		fitW = fitH * ratio
+	else
+		fitW = availW
+		fitH = fitW / ratio
+	end
+
+	local zoom = 1
+	local desired = Vector2.new(FIELD_W / 2, FIELD_H / 2)
+	if cameraMode == "Close" then
+		zoom = 1.7
+		desired = playerPos * 0.78 + ballPos * 0.22
+		local visibleW = FIELD_W / zoom
+		local visibleH = FIELD_H / zoom
+		desired = Vector2.new(
+			clamp(desired.X, visibleW / 2 - 38, FIELD_W - visibleW / 2 + 38),
+			clamp(desired.Y, visibleH / 2 - 28, FIELD_H - visibleH / 2 + 28)
+		)
+		if state == "Countdown" then
+			cameraCenter = desired
+		else
+			cameraCenter = cameraCenter:Lerp(desired, clamp(dt * 5.5, 0, 1))
+		end
+	else
+		cameraCenter = desired
+	end
+
+	local fieldWpx = fitW * zoom
+	local fieldHpx = fitH * zoom
+	local topLeft = Vector2.new(
+		areaCenter.X - (cameraCenter.X / FIELD_W) * fieldWpx,
+		areaCenter.Y - (cameraCenter.Y / FIELD_H) * fieldHpx
+	)
+	fieldFrame.Position = UDim2.fromOffset(topLeft.X, topLeft.Y)
+	fieldFrame.Size = UDim2.fromOffset(fieldWpx, fieldHpx)
 end
 
 local function render()
@@ -1762,10 +1920,10 @@ local function chargeStep(dt)
 	if chargeAimToGoal then
 		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
 		aim = Vector2.new(FIELD_W, cornerY)
-		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 30) and ballPos or playerPos
+		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH) and ballPos or playerPos
 	else
 		aim = screenToField(mouseGuiPos())
-		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 30) and ballPos or playerPos
+		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH) and ballPos or playerPos
 	end
 	local dir = aim - from
 	if dir.Magnitude > 1 then
@@ -1796,18 +1954,18 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		end
 	end
 
-	if input.UserInputType == Enum.UserInputType.MouseButton1 and state == "Playing" then
+	if input.UserInputType == Enum.UserInputType.MouseButton1 and state == "Playing" and not gameProcessed then
 		local mousePos = mouseGuiPos()
 		-- Заряжаем удар ТОЛЬКО по клику внутри поля (клики по кнопкам не трогаем)
 		if isScreenPosInsideField(mousePos) then
 			isCharging = true
 			chargeAimToGoal = false
-			chargePower = 0
+			chargePower = 0.20 -- даже быстрый клик сразу даёт нормальный удар в сторону курсора
 			powerBarBg.Visible = true
 		end
 	end
 
-	if input.UserInputType == Enum.UserInputType.Touch and state == "Playing" then
+	if input.UserInputType == Enum.UserInputType.Touch and state == "Playing" and not gameProcessed then
 		local p = toGuiSpace(Vector2.new(input.Position.X, input.Position.Y))
 		if isScreenPosInsideField(p) then
 			touchActive = true
@@ -1867,6 +2025,15 @@ pauseButton.MouseButton1Click:Connect(function()
 		togglePause(true)
 	end
 end)
+cameraGameButton.MouseButton1Click:Connect(function()
+	cameraMode = (cameraMode == "Full") and "Close" or "Full"
+	cancelCharge()
+	if cameraMode == "Close" then
+		cameraCenter = playerPos * 0.78 + ballPos * 0.22
+	end
+	refreshCameraButtons()
+	updateFieldCamera(1)
+end)
 quitToMenuButton.MouseButton1Click:Connect(function()
 	goToMenu()
 end)
@@ -1902,8 +2069,9 @@ RunService.RenderStepped:Connect(function(dt)
 		dt = 1 / 30
 	end
 
-	if menuFrame.Visible then
-		menuBall.Rotation = (menuBall.Rotation + dt * 18) % 360
+	if menuFrame.Visible and rainbowGradient then
+		rainbowGradient.Offset = Vector2.new((os.clock() * 0.20) % 1, 0)
+		rainbowGradient.Rotation = math.sin(os.clock() * 0.7) * 6
 	end
 
 	if not gameFrame.Visible then
@@ -1919,6 +2087,8 @@ RunService.RenderStepped:Connect(function(dt)
 		-- Стоим на местах, ждём свистка
 	end
 
+	updateFieldCamera(dt)
+
 	-- Мяч катится — крутим его рисунок
 	if state == "Playing" or state == "Goal" then
 		ballFrame.Rotation = (ballFrame.Rotation + ballVel.X * dt * 0.35) % 360
@@ -1927,4 +2097,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[RFC FOOTBALL 2D] Часть 1 загружена ✅ Меню на экране. Жми «ИГРАТЬ 1 на 1»!")
+print("[ROBALL] Часть 1 v1.1 загружена ✅ Лобби на экране. Жми «ИГРАТЬ 1 на 1»!")
