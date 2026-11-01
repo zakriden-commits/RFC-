@@ -1,7 +1,13 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.1 (МЕНЮ + Матч 1 на 1 С БОТОМ)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.2 (МЕНЮ + Матч 1 на 1 С БОТОМ)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
+
+  ЧТО НОВОГО В 1.2:
+  • Фишки едут медленнее и по-настоящему плавно: разгон, инерция, скольжение при остановке
+  • Удар стал физическим: мяч летит ОТ фишки через центр мяча; откуда зашёл — туда и полетел
+  • Курсор больше не разворачивает мяч сквозь фишку, а только подправляет угол удара
+  • Бот переписан в атаку: прессингует, идёт в отбор, ведёт мяч к твоим воротам и бьёт
 
   ЧТО ИСПРАВЛЕНО В 1.1:
   • Лобби полностью отдельное и ровное: в меню НЕТ поля, ничего не налезает друг на друга
@@ -18,7 +24,7 @@
   • Кнопка «ИГРАТЬ 1 на 1» + выбор сложности бота (Лёгкий / Средний / Сложный)
   • Полностью 2D-игра (НЕ на 3D-карте, всё рисуется интерфейсом)
   • Игрок и бот — круглые фишки, мяч в центре поля
-  • Удар на ЛКМ: держишь — заряжается сила, отпускаешь — мяч летит в сторону курсора
+  • Удар на ЛКМ: мяч летит от твоей фишки через центр мяча; курсор подправляет угол
   • Умный ИИ бота: атакует, защищается, выбивает мяч, бьёт по углам ворот
   • Матч до 3 голов, время матча — 2 минуты (ничья по времени = золотой гол)
   • Большое поле с видом «всё поле / только я», табло, пауза, конец матча, реванш
@@ -42,7 +48,7 @@
 --------------------------------------------------------------------------------
   WASD / Стрелки ......... движение фишки
   ЛКМ (держать) .......... зарядка удара (появится прицел и полоса силы)
-  ЛКМ (отпустить) ........ удар: мяч летит в сторону курсора мыши
+  ЛКМ (отпустить) ........ удар по физике: зайди за мяч с нужной стороны и бей
   ЛКМ вдалеке от мяча .... короткий рывок в сторону курсора
   Shift .................. спринт
   P или кнопка ⏸ ......... пауза
@@ -79,8 +85,8 @@ end
 local SETTINGS = {
 	WIN_GOALS    = 3,      -- матч до скольки голов
 	MATCH_TIME   = 120,    -- время матча в секундах (2 минуты)
-	PLAYER_SPEED = 345,    -- скорость фишки игрока
-	PLAYER_SPRINT = 460,   -- скорость на Shift
+	PLAYER_SPEED = 285,    -- максимальная скорость фишки игрока (разгон плавный)
+	PLAYER_SPRINT = 360,   -- максимальная скорость на Shift
 }
 
 --// Виртуальное поле (координаты игры, НЕ пиксели экрана) \\--
@@ -100,21 +106,21 @@ local POSTS = {                          -- штанги
 local DIFFICULTIES = {
 	Easy = {
 		Title = "😊 ЛЁГКИЙ", ButtonText = "ЛЁГКИЙ", Color = Color3.fromRGB(76, 217, 100),
-		Speed = 228, Reaction = 0.50, KickPower = 480, KickCooldown = 1.50,
-		AimError = 26, Predict = 0.00, Aggression = 0.30, ShootX = 300,
-		Description = "Бот медленный и часто ошибается. Для разминки.",
+		Speed = 188, Accel = 500, Reaction = 0.45, KickPower = 480, KickCooldown = 1.35,
+		AimError = 24, Predict = 0.05, Aggression = 0.42, ShootX = 365,
+		Description = "Бот спокойный, но всё равно выходит в атаку.",
 	},
 	Medium = {
 		Title = "⚔️ СРЕДНИЙ", ButtonText = "СРЕДНИЙ", Color = Color3.fromRGB(255, 204, 0),
-		Speed = 298, Reaction = 0.28, KickPower = 650, KickCooldown = 1.00,
-		AimError = 14, Predict = 0.35, Aggression = 0.60, ShootX = 400,
-		Description = "Бот борется, защищается и бьёт по углам.",
+		Speed = 240, Accel = 640, Reaction = 0.24, KickPower = 650, KickCooldown = 0.95,
+		AimError = 13, Predict = 0.38, Aggression = 0.68, ShootX = 470,
+		Description = "Бот прессингует, ведёт мяч и бьёт по углам.",
 	},
 	Hard = {
 		Title = "🔥 СЛОЖНЫЙ", ButtonText = "СЛОЖНЫЙ", Color = Color3.fromRGB(255, 59, 48),
-		Speed = 368, Reaction = 0.12, KickPower = 830, KickCooldown = 0.65,
-		AimError = 6, Predict = 0.70, Aggression = 0.85, ShootX = 485,
-		Description = "Предвидит мяч, быстрый и точный. Удачи.",
+		Speed = 292, Accel = 780, Reaction = 0.11, KickPower = 830, KickCooldown = 0.62,
+		AimError = 6, Predict = 0.72, Aggression = 0.90, ShootX = 555,
+		Description = "Предвидит мяч, жёстко прессингует и атакует.",
 	},
 }
 local DIFF_ORDER = { "Easy", "Medium", "Hard" }
@@ -160,6 +166,9 @@ local dashTime, dashCooldown = 0, 0
 local dashDir = Vector2.new(1, 0)
 
 local botTargetPos = Vector2.new(800, 300)
+local botMode = "Attack"               -- Attack / Challenge / Defend
+local botCommitTimer = 0                -- бот доводит начатую атаку до конца, а не бросает на полпути
+local botPressTimer = 4                 -- периодические волны прессинга даже на чужой половине
 local botThinkTimer, botKickCooldown = 0, 0.5
 local ballIdleTimer = 0
 
@@ -199,6 +208,22 @@ local function rotate2(v, radians)
 	local c = math.cos(radians)
 	local s = math.sin(radians)
 	return Vector2.new(v.X * c - v.Y * s, v.X * s + v.Y * c)
+end
+
+-- Подписанный угол от вектора a к вектору b (нужен физическому удару)
+local function signedAngle2(a, b)
+	return math.atan(a.X * b.Y - a.Y * b.X, a.X * b.X + a.Y * b.Y)
+end
+
+-- Плавная физика фишки: скорость меняется не мгновенно, а с ускорением.
+-- Из-за этого есть разгон, инерция, скольжение при остановке и мягкие повороты.
+local function approachVelocity(current, desired, acceleration, dt)
+	local delta = desired - current
+	local maxChange = acceleration * dt
+	if delta.Magnitude <= maxChange then
+		return desired
+	end
+	return current + unit2(delta) * maxChange
 end
 
 local function create(className, props, parent)
@@ -670,9 +695,9 @@ playButton.MouseButton1Click:Connect(function()
 end)
 
 -- Подсказку управления снизу меню
-local controlsText = "🎮 WASD — движение  •  ЛКМ держать/отпустить — удар по курсору  •  Shift — спринт  •  P — пауза"
+local controlsText = "🎮 WASD — движение  •  ЛКМ — удар от фишки через мяч  •  Shift — спринт  •  P — пауза"
 if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
-	controlsText = "📱 Веди фишку пальцем по полю  •  Кнопка «УДАР» — удар по воротам (держи для силы)"
+	controlsText = "📱 Веди фишку пальцем  •  Зайди за мяч с нужной стороны  •  Кнопка «УДАР» бьёт по физике"
 end
 makeText(menuFrame, {
 	AnchorPoint = Vector2.new(0.5, 1),
@@ -690,7 +715,7 @@ makeText(menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ROBALL • ЧАСТЬ 1 • v1.1",
+	Text = "ROBALL • ЧАСТЬ 1 • v1.2",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -1065,7 +1090,7 @@ makeText(gameFrame, {
 	Position = UDim2.fromScale(0.012, 0.99),
 	Size = UDim2.fromScale(0.31, 0.04),
 	Text = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
-		and "📱 Палец по полю — движение • УДАР — по воротам"
+		and "📱 Палец по полю — движение • УДАР от фишки через мяч"
 		or "🎮 WASD — движение • ЛКМ — удар • Shift — спринт",
 	TextSize = 14,
 	TextScaled = true,
@@ -1323,6 +1348,9 @@ function resetKickoff(kickoffTeam)
 		cameraCenter = Vector2.new(FIELD_W / 2, FIELD_H / 2)
 	end
 	botTargetPos = botPos
+	botMode = (kickoffTeam == "Bot") and "Attack" or "Challenge"
+	botCommitTimer = (kickoffTeam == "Bot") and 2.5 or 0
+	botPressTimer = 4
 	botThinkTimer = 0
 	botKickCooldown = 0.6
 	ballIdleTimer = 0
@@ -1493,6 +1521,33 @@ function onGoal(scorer) -- scorer: "player" или "Bot"
 	end)
 end
 
+-- ФИЗИКА УДАРА:
+-- Главное направление идёт ОТ ЦЕНТРА ФИШКИ ЧЕРЕЗ ЦЕНТР МЯЧА.
+-- Зашёл слева — мяч полетит вправо. Зашёл справа — влево (хоть в свои ворота).
+-- Сверху/снизу/под углом — мяч уйдёт по той же линии контакта.
+-- Курсор/цель может только довернуть удар на ограниченный угол и НЕ может
+-- развернуть мяч назад сквозь саму фишку. Так удар зависит от места касания.
+local function getKickDirection(isBot, aimPoint)
+	local chipPos = isBot and botPos or playerPos
+	local chipVel = isBot and botVel or playerVel
+	local contactDir = unit2(ballPos - chipPos)
+	if contactDir.Magnitude < 0.01 then
+		contactDir = unit2(chipVel)
+	end
+	if contactDir.Magnitude < 0.01 then
+		contactDir = isBot and Vector2.new(-1, 0) or Vector2.new(1, 0)
+	end
+
+	local aimDir = unit2(aimPoint - ballPos)
+	if aimDir.Magnitude < 0.01 then
+		return contactDir
+	end
+
+	local maxTurn = math.rad(isBot and 68 or 58)
+	local turn = clamp(signedAngle2(contactDir, aimDir), -maxTurn, maxTurn)
+	return rotate2(contactDir, turn)
+end
+
 -- Удар по мячу. Возвращает true, если мяч был в радиусе удара.
 local function kickBall(isBot, aimPoint, power01)
 	local chipPos = isBot and botPos or playerPos
@@ -1502,10 +1557,7 @@ local function kickBall(isBot, aimPoint, power01)
 	if toBall.Magnitude > reach then
 		return false
 	end
-	local dir = unit2(aimPoint - ballPos)
-	if dir.Magnitude < 0.01 then
-		dir = isBot and Vector2.new(-1, 0) or Vector2.new(1, 0)
-	end
+	local dir = getKickDirection(isBot, aimPoint)
 	local p = clamp(power01, 0, 1)
 	local speed
 	if isBot then
@@ -1513,7 +1565,8 @@ local function kickBall(isBot, aimPoint, power01)
 	else
 		speed = 280 + p * 760
 	end
-	ballVel = dir * speed + chipVel * 0.15
+	-- Скорость фишки чуть добавляется мячу, но не ломает линию физического удара
+	ballVel = dir * speed + chipVel * 0.12
 	if isBot then
 		shotsBot = shotsBot + 1
 	else
@@ -1538,7 +1591,7 @@ local function releaseKick()
 	local power = math.max(chargePower, 0.25) -- быстрый клик тоже нормально бьёт
 	local aim
 	if chargeAimToGoal then
-		-- Телефонная кнопка: бьём по углу ворот бота, дальнему от самого бота
+		-- Телефон/Пробел: цель — угол ворот бота, но итог всё равно ограничивает физика контакта
 		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
 		aim = Vector2.new(FIELD_W, cornerY)
 	else
@@ -1554,8 +1607,8 @@ local function releaseKick()
 			local d = unit2(aim - playerPos)
 			if d.Magnitude > 0.01 then
 				dashDir = d
-				dashTime = 0.16
-				dashCooldown = 0.8
+				dashTime = 0.18
+				dashCooldown = 0.9
 			end
 		end
 	end
@@ -1569,15 +1622,24 @@ end
 local function botStep(dt)
 	botThinkTimer = botThinkTimer - dt
 	botKickCooldown = math.max(0, botKickCooldown - dt)
+	botCommitTimer = math.max(0, botCommitTimer - dt)
+	botPressTimer = botPressTimer - dt
+	if botPressTimer <= 0 then
+		-- Даже если игрок долго держит мяч на своей половине,
+		-- бот периодически сам идёт в прессинг, а не ждёт у своих ворот.
+		botCommitTimer = math.max(botCommitTimer, 2.3)
+		botPressTimer = rng:NextNumber(6.5, 9.5)
+	end
 	local d = currentDiff
 
 	-- «Мозг» бота просыпается раз в Reaction секунд (у сложного — чаще)
 	if botThinkTimer <= 0 then
 		botThinkTimer = d.Reaction
 
-		-- Предсказание: куда мяч прилетит (сложный бот предвидит лучше)
+		-- Предсказание перехвата: где мяч окажется, пока бот до него добежит
 		local distToBall = (ballPos - botPos).Magnitude
-		local predicted = ballPos + ballVel * (d.Predict * clamp(distToBall / 500, 0, 1))
+		local reachTime = clamp(distToBall / math.max(d.Speed, 1), 0, 0.85)
+		local predicted = ballPos + ballVel * reachTime * ((0.25 + d.Predict) * 0.78)
 		predicted = Vector2.new(
 			clamp(predicted.X, BALL_R, FIELD_W - BALL_R),
 			clamp(predicted.Y, BALL_R, FIELD_H - BALL_R)
@@ -1585,42 +1647,115 @@ local function botStep(dt)
 
 		local botDist = (predicted - botPos).Magnitude
 		local playerDist = (predicted - playerPos).Magnitude
-		local ballThreat = ballPos.X > 740 and ballVel.X > 140 -- мяч летит в ворота бота!
-		local attackLine = 560 - d.Aggression * 180            -- насколько глубоко бот прессингует
-		local shouldAttack = ballThreat
-			or predicted.X > attackLine
-			or botDist < playerDist * 0.95
-			or ballIdleTimer > 3                              -- мяч застрял — бот сам идёт за ним
+		local botETA = botDist / math.max(d.Speed, 1)
+		local playerETA = playerDist / SETTINGS.PLAYER_SPRINT
+		local canWinRace = botETA <= playerETA + (-0.12 + d.Aggression * 0.55)
 
-		if shouldAttack then
-			if botDist > 72 then
-				-- Заходим к мячу со стороны СВОИХ ворот (справа),
-				-- чтобы толкать и бить его в сторону ворот игрока (влево)
-				botTargetPos = predicted + Vector2.new(PLAYER_R * 0.95, clamp((predicted.Y - GOAL_CENTER_Y) * 0.18, -22, 22))
+		local playerHasBall = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 50
+		local botHasBall = (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH + 28
+		local looseBall = not playerHasBall and not botHasBall
+		local ballThreat = (ballPos.X > 720 and ballVel.X > 110)
+			or (ballPos.X > 850 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 175)
+
+		-- Линия прессинга: сложный бот встречает игрока очень глубоко.
+		-- Проигрывает или мало времени — прессингует ещё выше.
+		local pressLine = 470 - d.Aggression * 320
+		if botScore < playerScore then
+			pressLine = pressLine - 110
+		end
+		if overtime or (timeLeft < 35 and botScore <= playerScore) then
+			pressLine = pressLine - 80
+		end
+
+		if ballThreat then
+			botMode = "Defend"
+		elseif botHasBall or botCommitTimer > 0 or canWinRace
+			or predicted.X >= pressLine
+			or (looseBall and predicted.X >= pressLine - 110)
+			or ballIdleTimer > 1.2 then
+			botMode = "Attack"
+		elseif playerHasBall and predicted.X >= 260 then
+			botMode = "Challenge"
+		else
+			botMode = "Defend"
+		end
+
+		-- Куда бот ХОЧЕТ отправить мяч. Отсюда считается и заход за мяч:
+		-- для физического удара бот встаёт С ПРОТИВОПОЛОЖНОЙ стороны.
+		local attackTarget
+		if ballPos.X > 820 then
+			attackTarget = Vector2.new(330, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
+		elseif predicted.X < d.ShootX then
+			local cornerY = (playerPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
+			attackTarget = Vector2.new(0, cornerY)
+		else
+			local laneY = predicted.Y * 0.70 + GOAL_CENTER_Y * 0.30 + ((playerPos.Y < predicted.Y) and 38 or -38)
+			attackTarget = Vector2.new(predicted.X - 320, clamp(laneY, 70, FIELD_H - 70))
+		end
+		local shotDir = unit2(attackTarget - predicted)
+		local approachPoint = predicted - shotDir * (PLAYER_R + BALL_R + 8)
+		local contactDir = unit2(predicted - botPos)
+		local alignment = contactDir:Dot(shotDir)
+
+		if botMode == "Attack" or botMode == "Challenge" then
+			-- Сначала заходим за мяч с правильной стороны, и только потом идём в мяч.
+			-- Поэтому бот не толкает его случайно к своим воротам и реально ведёт атаку влево.
+			if botDist > 92 or alignment < 0.20 then
+				botTargetPos = approachPoint
 			else
 				botTargetPos = predicted
 			end
 		else
-			-- Оборона: встаём между мячом и своими воротами
-			local goalPos = Vector2.new(FIELD_W, GOAL_CENTER_Y)
-			local dirToBall = unit2(ballPos - goalPos)
-			local defPos = goalPos + dirToBall * 230
-			botTargetPos = Vector2.new(clamp(defPos.X, 610, 940), clamp(defPos.Y, 90, FIELD_H - 90))
+			if ballThreat then
+				-- Угроза своим воротам: перехватываем мяч, по возможности со стороны ворот.
+				if botDist > 80 and alignment < 0.05 then
+					botTargetPos = approachPoint
+				else
+					botTargetPos = predicted
+				end
+			else
+				-- Редкая настоящая оборона — и та высокой линией, а не стоя в воротах.
+				local goalPos = Vector2.new(FIELD_W, GOAL_CENTER_Y)
+				local dirToBall = unit2(ballPos - goalPos)
+				local defPos = goalPos + dirToBall * 315
+				botTargetPos = Vector2.new(clamp(defPos.X, 540, 925), clamp(defPos.Y, 85, FIELD_H - 85))
+			end
 		end
 	end
 
-	-- Движение к цели (плавный разгон/торможение)
+	-- Движение бота: тот же физический подход, что у игрока.
 	local toTarget = botTargetPos - botPos
-	local desired = Vector2.new(0, 0)
-	if toTarget.Magnitude > 5 then
-		desired = unit2(toTarget) * d.Speed
+	local targetDist = toTarget.Magnitude
+	local speedNow = d.Speed
+	if targetDist < 105 then
+		speedNow = speedNow * clamp(targetDist / 105, 0.22, 1)
 	end
-	botVel = botVel:Lerp(desired, clamp(dt * 8, 0, 1))
+	local ballDistNow = (ballPos - botPos).Magnitude
+	if (botMode == "Attack" or botMode == "Challenge") and ballDistNow < 135 then
+		-- Рядом с мячом бот контролирует скорость, чтобы не пролетать мяч насквозь
+		speedNow = math.min(speedNow, math.max(105, d.Speed * 0.76))
+	end
+	local desired = Vector2.new(0, 0)
+	if targetDist > 4 then
+		desired = unit2(toTarget) * speedNow
+	end
+	local botAccel = d.Accel or 600
+	if desired.Magnitude < 1 then
+		botAccel = botAccel * 1.15
+	end
+	botVel = approachVelocity(botVel, desired, botAccel, dt)
+	if desired.Magnitude < 1 and botVel.Magnitude < 4 then
+		botVel = Vector2.new(0, 0)
+	end
 	botPos = botPos + botVel * dt
-	botPos = Vector2.new(
+	local clampedBotPos = Vector2.new(
 		clamp(botPos.X, PLAYER_R, FIELD_W - PLAYER_R),
 		clamp(botPos.Y, PLAYER_R, FIELD_H - PLAYER_R)
 	)
+	-- У борта скорость в стену гаснет, а вдоль борта фишка скользит
+	if clampedBotPos.X ~= botPos.X then botVel = Vector2.new(0, botVel.Y) end
+	if clampedBotPos.Y ~= botPos.Y then botVel = Vector2.new(botVel.X, 0) end
+	botPos = clampedBotPos
 
 	-- Решение об ударе
 	if botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
@@ -1628,24 +1763,40 @@ local function botStep(dt)
 		if ballPos.X > 820 then
 			-- Опасно у своих ворот — вынос на фланг, подальше от игрока
 			aim = Vector2.new(300, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
-			power = 0.78
+			power = 0.76
 		elseif ballPos.X < d.ShootX then
 			-- Удар по воротам: в угол, дальний от игрока
 			local cornerY = (playerPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
 			aim = Vector2.new(0, cornerY)
-			power = 0.85
+			power = 0.86
 		else
-			-- Ведение: проталкиваем мяч вперёд (влево) в свободную зону
-			local sideStep = (playerPos.Y < ballPos.Y) and 95 or -95
-			aim = Vector2.new(ballPos.X - 260, clamp(ballPos.Y + sideStep, 50, FIELD_H - 50))
-			power = 0.42
+			-- Атакующее ведение: толкаем мяч к воротам игрока и ближе к центру
+			local laneY = ballPos.Y * 0.70 + GOAL_CENTER_Y * 0.30 + ((playerPos.Y < ballPos.Y) and 38 or -38)
+			aim = Vector2.new(ballPos.X - 320, clamp(laneY, 70, FIELD_H - 70))
+			power = 0.50
 		end
-		-- Ошибка прицела зависит от сложности
-		local errRad = math.rad(rng:NextNumber(-d.AimError, d.AimError))
-		local finalDir = rotate2(unit2(aim - ballPos), errRad)
-		local finalAim = ballPos + finalDir * 220
-		if kickBall(true, finalAim, power) then
-			botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
+
+		-- Физический удар нельзя делать с неправильной стороны:
+		-- если бот оказался не за мячом, он обежит его, а не ударит назад.
+		local desiredDir = unit2(aim - ballPos)
+		local contactDirNow = unit2(ballPos - botPos)
+		local alignmentNow = contactDirNow:Dot(desiredDir)
+		local emergency = ballPos.X > 845 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180
+		local minAlignment = -0.15 + d.Aggression * 0.50
+
+		if alignmentNow >= minAlignment or (emergency and alignmentNow > -0.35) then
+			local errRad = math.rad(rng:NextNumber(-d.AimError, d.AimError))
+			local finalDir = rotate2(desiredDir, errRad)
+			local finalAim = ballPos + finalDir * 220
+			if kickBall(true, finalAim, power) then
+				botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
+				-- После ведения/выноса бот продолжает атаку за мячом
+				botCommitTimer = math.max(botCommitTimer, (ballPos.X > 820) and 1.7 or 2.3)
+				botMode = "Attack"
+			end
+		else
+			botTargetPos = ballPos - desiredDir * (PLAYER_R + BALL_R + 10)
+			botThinkTimer = math.min(botThinkTimer, 0.05)
 		end
 	end
 end
@@ -1657,10 +1808,13 @@ local function playerStep(dt)
 	dashCooldown = math.max(0, dashCooldown - dt)
 
 	local move = Vector2.new(0, 0)
+	local touchSpeedScale = 1
 	if touchActive then
 		local toTouch = touchFieldPos - playerPos
-		if toTouch.Magnitude > 14 then
+		if toTouch.Magnitude > 12 then
 			move = unit2(toTouch)
+			-- У пальца не дёргаемся: чем ближе цель, тем мягче скорость
+			touchSpeedScale = clamp(toTouch.Magnitude / 95, 0.25, 1)
 		end
 	elseif not UserInputService:GetFocusedTextBox() then
 		if keysDown[Enum.KeyCode.W] or keysDown[Enum.KeyCode.Up] then move = move + Vector2.new(0, -1) end
@@ -1670,28 +1824,46 @@ local function playerStep(dt)
 	end
 
 	if dashTime > 0 then
+		-- Рывок тоже физический: резкий, но не телепорт скорости в один frame
 		dashTime = dashTime - dt
-		playerVel = dashDir * 640
+		playerVel = approachVelocity(playerVel, dashDir * 500, 1900, dt)
 	else
 		local speed = SETTINGS.PLAYER_SPEED
 		if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] then
 			speed = SETTINGS.PLAYER_SPRINT
 		end
 		if isCharging then
-			speed = speed * 0.7 -- пока целишься — идёшь медленнее
+			speed = speed * 0.72 -- пока целишься — идёшь медленнее
 		end
+		speed = speed * touchSpeedScale
+
 		local desired = Vector2.new(0, 0)
 		if move.Magnitude > 0.01 then
 			desired = unit2(move) * speed
 		end
-		playerVel = playerVel:Lerp(desired, clamp(dt * 12, 0, 1))
+
+		-- Разгон ~0.35 сек, остановка с коротким скольжением, разворот с инерцией
+		local acceleration = 820
+		if desired.Magnitude < 1 then
+			acceleration = 980
+		elseif playerVel.Magnitude > 20 and playerVel:Dot(desired) < 0 then
+			acceleration = 900
+		end
+		playerVel = approachVelocity(playerVel, desired, acceleration, dt)
+		if desired.Magnitude < 1 and playerVel.Magnitude < 5 then
+			playerVel = Vector2.new(0, 0)
+		end
 	end
 
 	playerPos = playerPos + playerVel * dt
-	playerPos = Vector2.new(
+	local clampedPlayerPos = Vector2.new(
 		clamp(playerPos.X, PLAYER_R, FIELD_W - PLAYER_R),
 		clamp(playerPos.Y, PLAYER_R, FIELD_H - PLAYER_R)
 	)
+	-- У борта скорость в стену гаснет, а вдоль борта фишка скользит
+	if clampedPlayerPos.X ~= playerPos.X then playerVel = Vector2.new(0, playerVel.Y) end
+	if clampedPlayerPos.Y ~= playerPos.Y then playerVel = Vector2.new(playerVel.X, 0) end
+	playerPos = clampedPlayerPos
 end
 
 -- Фишки не проходят друг сквозь друга
@@ -1700,9 +1872,16 @@ local function resolveChipChip()
 	local dist = diff.Magnitude
 	local minDist = PLAYER_R * 2
 	if dist > 0.001 and dist < minDist then
-		local push = unit2(diff) * ((minDist - dist) / 2)
+		local n = unit2(diff)
+		local push = n * ((minDist - dist) / 2)
 		playerPos = playerPos - push
 		botPos = botPos + push
+		-- Мягкий физический толчок корпусом без дёрганья: выравниваем скорость вдоль линии столкновения
+		local closingSpeed = (botVel - playerVel):Dot(n)
+		if closingSpeed < 0 then
+			playerVel = playerVel + n * (closingSpeed / 2)
+			botVel = botVel - n * (closingSpeed / 2)
+		end
 		playerPos = Vector2.new(clamp(playerPos.X, PLAYER_R, FIELD_W - PLAYER_R), clamp(playerPos.Y, PLAYER_R, FIELD_H - PLAYER_R))
 		botPos = Vector2.new(clamp(botPos.X, PLAYER_R, FIELD_W - PLAYER_R), clamp(botPos.Y, PLAYER_R, FIELD_H - PLAYER_R))
 	end
@@ -1914,18 +2093,25 @@ local function chargeStep(dt)
 		powerBarFill.BackgroundColor3 = COL.Yellow:Lerp(Color3.fromRGB(255, 59, 48), (chargePower - 0.5) * 2)
 	end
 
-	-- Прицел: от мяча (если рядом) или от фишки — в сторону цели
+	-- Прицел показывает НАСТОЯЩЕЕ физическое направление удара:
+	-- от фишки через центр мяча, а курсор лишь аккуратно доворачивает угол.
 	local from
 	local aim
+	local dir
+	local inKickRange = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH
 	if chargeAimToGoal then
 		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
 		aim = Vector2.new(FIELD_W, cornerY)
-		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH) and ballPos or playerPos
 	else
 		aim = screenToField(mouseGuiPos())
-		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH) and ballPos or playerPos
 	end
-	local dir = aim - from
+	if inKickRange then
+		from = ballPos
+		dir = getKickDirection(false, aim) * 100
+	else
+		from = playerPos
+		dir = aim - from -- мяч далеко: стрелка показывает направление рывка
+	end
 	if dir.Magnitude > 1 then
 		aimLine.Position = fieldPosToUI(from)
 		aimLine.Rotation = math.deg(math.atan(dir.Y, dir.X))
@@ -1960,7 +2146,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if isScreenPosInsideField(mousePos) then
 			isCharging = true
 			chargeAimToGoal = false
-			chargePower = 0.20 -- даже быстрый клик сразу даёт нормальный удар в сторону курсора
+			chargePower = 0.20 -- даже быстрый клик даёт нормальный физический удар
 			powerBarBg.Visible = true
 		end
 	end
@@ -2004,7 +2190,7 @@ UserInputService.WindowFocusReleased:Connect(function()
 	end
 end)
 
--- Кнопка УДАР (телефон): держишь — заряд, отпустил — выстрел по воротам
+-- Кнопка УДАР (телефон): держишь — заряд, отпустил — физический удар от фишки через мяч
 kickButton.MouseButton1Down:Connect(function()
 	if state == "Playing" then
 		isCharging = true
@@ -2097,4 +2283,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.1 загружена ✅ Лобби на экране. Жми «ИГРАТЬ 1 на 1»!")
+print("[ROBALL] Часть 1 v1.2 загружена ✅ Лобби на экране. Жми «ИГРАТЬ 1 на 1»!")
