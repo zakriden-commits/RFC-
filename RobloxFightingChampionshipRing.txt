@@ -1,0 +1,298 @@
+--[[
+ROBLOX FIGHTING CHAMPIONSHIP — BOXING RING
+
+INSTALL:
+1. In Roblox Studio, open ServerScriptService.
+2. Insert a normal Script (not a LocalScript).
+3. Copy this entire file into that Script and press Play.
+
+The script builds a square boxing ring in Workspace and sets its center as the
+spawn point for every player, including respawns. It is safe to run again: the
+previous ring model is replaced.
+
+EDIT THESE SETTINGS below to move the ring or change its size/height.
+]]
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+-- SETTINGS ---------------------------------------------------------------
+local RING_CENTER = Vector3.new(0, 0, 0) -- X/Z position of the ring's center
+local PLATFORM_BOTTOM_Y = 0.5            -- top of a standard Roblox Baseplate
+
+local PLATFORM_SIZE = 52
+local PLATFORM_THICKNESS = 2
+local CANVAS_SIZE = 47
+local CANVAS_THICKNESS = 0.16
+
+local POST_OFFSET = 24.2
+local POST_HEIGHT = 6.6
+local POST_WIDTH = 0.72
+local PAD_SIZE = 1.08
+local PAD_HEIGHT = 5.75
+
+local ROPE_DIAMETER = 0.30
+local ROPE_HEIGHTS = { 1.40, 2.68, 3.96, 5.24 } -- measured above the mat
+
+local RING_MODEL_NAME = "RobloxFightingChampionshipRing"
+
+-- COLORS -----------------------------------------------------------------
+local NAVY = Color3.fromRGB(17, 15, 75)
+local RED = Color3.fromRGB(190, 30, 40)
+local BLUE = Color3.fromRGB(30, 32, 112)
+local NEUTRAL_ROPE = Color3.fromRGB(205, 207, 207)
+local METAL = Color3.fromRGB(150, 154, 158)
+local MAT_COLOR = Color3.fromRGB(238, 238, 234)
+local INK = Color3.fromRGB(24, 25, 27)
+
+local DECK_TOP_Y = PLATFORM_BOTTOM_Y + PLATFORM_THICKNESS
+local MAT_TOP_Y = DECK_TOP_Y + CANVAS_THICKNESS
+local HALF_POST = POST_OFFSET
+
+-- Remove a previous copy so pressing Play or rerunning the script doesn't
+-- leave duplicate rings behind.
+local previousRing = Workspace:FindFirstChild(RING_MODEL_NAME)
+if previousRing then
+    previousRing:Destroy()
+end
+
+local ring = Instance.new("Model")
+ring.Name = RING_MODEL_NAME
+ring.Parent = Workspace
+
+local function makePart(name, size, cframe, color, material, canCollide, parent)
+    local part = Instance.new("Part")
+    part.Name = name
+    part.Size = size
+    part.CFrame = cframe
+    part.Color = color
+    part.Material = material or Enum.Material.SmoothPlastic
+    part.Anchored = true
+    part.CanCollide = canCollide ~= false
+    part.TopSurface = Enum.SurfaceType.Smooth
+    part.BottomSurface = Enum.SurfaceType.Smooth
+    part.Parent = parent or ring
+    return part
+end
+
+-- PLATFORM / APRON -------------------------------------------------------
+makePart(
+    "DeepNavyApron",
+    Vector3.new(PLATFORM_SIZE, PLATFORM_THICKNESS, PLATFORM_SIZE),
+    CFrame.new(RING_CENTER.X, PLATFORM_BOTTOM_Y + PLATFORM_THICKNESS / 2, RING_CENTER.Z),
+    NAVY,
+    Enum.Material.SmoothPlastic,
+    true
+)
+
+local mat = makePart(
+    "LightGrayRingCanvas",
+    Vector3.new(CANVAS_SIZE, CANVAS_THICKNESS, CANVAS_SIZE),
+    CFrame.new(RING_CENTER.X, DECK_TOP_Y + CANVAS_THICKNESS / 2, RING_CENTER.Z),
+    MAT_COLOR,
+    Enum.Material.Fabric,
+    true
+)
+
+-- Branding printed on the top face of the canvas, like the logo on the
+-- reference photo. The short RFC monogram sits above the full requested name.
+local branding = Instance.new("SurfaceGui")
+branding.Name = "RFC_CanvasBranding"
+branding.Face = Enum.NormalId.Top
+branding.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+branding.PixelsPerStud = 32
+branding.LightInfluence = 0
+branding.AlwaysOnTop = false
+branding.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+branding.Parent = mat
+
+local monogram = Instance.new("TextLabel")
+monogram.Name = "RFC_Monogram"
+monogram.BackgroundTransparency = 1
+monogram.Position = UDim2.fromScale(0.39, 0.345)
+monogram.Size = UDim2.fromScale(0.22, 0.12)
+monogram.Font = Enum.Font.GothamBlack
+monogram.Text = "RFC"
+monogram.TextColor3 = INK
+monogram.TextScaled = true
+monogram.TextWrapped = true
+monogram.Parent = branding
+
+local title = Instance.new("TextLabel")
+title.Name = "ChampionshipTitle"
+title.BackgroundTransparency = 1
+title.Position = UDim2.fromScale(0.14, 0.47)
+title.Size = UDim2.fromScale(0.72, 0.17)
+title.Font = Enum.Font.GothamBold
+title.Text = "ROBLOX FIGHTING\nCHAMPIONSHIP"
+title.TextColor3 = INK
+title.TextScaled = true
+title.TextWrapped = true
+title.Parent = branding
+
+-- CORNER POSTS -----------------------------------------------------------
+local redCorner = Color3.fromRGB(205, 32, 42)
+local blueCorner = Color3.fromRGB(34, 37, 126)
+local neutralCorner = Color3.fromRGB(195, 198, 198)
+
+local corners = {
+    { name = "RedCorner",      x = -HALF_POST, z =  HALF_POST, padColor = redCorner },
+    { name = "BlueCorner",     x =  HALF_POST, z = -HALF_POST, padColor = blueCorner },
+    { name = "NeutralCornerA", x = -HALF_POST, z = -HALF_POST, padColor = neutralCorner },
+    { name = "NeutralCornerB", x =  HALF_POST, z =  HALF_POST, padColor = neutralCorner },
+}
+
+for _, corner in ipairs(corners) do
+    local position = Vector3.new(RING_CENTER.X + corner.x, 0, RING_CENTER.Z + corner.z)
+
+    makePart(
+        corner.name .. "BasePlate",
+        Vector3.new(1.55, 0.24, 1.55),
+        CFrame.new(position.X, DECK_TOP_Y + 0.12, position.Z),
+        METAL,
+        Enum.Material.Metal,
+        true
+    )
+
+    makePart(
+        corner.name .. "SteelPost",
+        Vector3.new(POST_WIDTH, POST_HEIGHT, POST_WIDTH),
+        CFrame.new(position.X, DECK_TOP_Y + POST_HEIGHT / 2, position.Z),
+        METAL,
+        Enum.Material.Metal,
+        true
+    )
+
+    makePart(
+        corner.name .. "PaddedCover",
+        Vector3.new(PAD_SIZE, PAD_HEIGHT, PAD_SIZE),
+        CFrame.new(position.X, DECK_TOP_Y + PAD_HEIGHT / 2 + 0.12, position.Z),
+        corner.padColor,
+        Enum.Material.SmoothPlastic,
+        true
+    )
+
+    makePart(
+        corner.name .. "TopCap",
+        Vector3.new(0.92, 0.18, 0.92),
+        CFrame.new(position.X, DECK_TOP_Y + POST_HEIGHT + 0.03, position.Z),
+        METAL,
+        Enum.Material.Metal,
+        true
+    )
+end
+
+-- ROPES ------------------------------------------------------------------
+-- The ropes are split at each side's midpoint: red near the red corner,
+-- blue near the blue corner, and light gray near the neutral corners.
+local function addRopeSegment(name, pointA, pointB, heightAboveMat, color)
+    local delta = pointB - pointA
+    local midpoint = (pointA + pointB) / 2
+    local length = delta.Magnitude + 0.04 -- tiny overlap prevents visible seams
+    local ropeY = MAT_TOP_Y + heightAboveMat
+
+    local ropeCFrame = CFrame.new(midpoint.X, ropeY, midpoint.Z)
+    if math.abs(delta.Z) > math.abs(delta.X) then
+        -- Cylinders are lengthwise along local X; rotate them to run along Z.
+        ropeCFrame = ropeCFrame * CFrame.Angles(0, math.rad(90), 0)
+    end
+
+    local rope = makePart(
+        name,
+        Vector3.new(length, ROPE_DIAMETER, ROPE_DIAMETER),
+        ropeCFrame,
+        color,
+        Enum.Material.SmoothPlastic,
+        false
+    )
+    rope.Shape = Enum.PartType.Cylinder
+    rope.CanTouch = false
+    rope.CanQuery = false
+end
+
+local function addSideRopes(sideName, pointA, pointB, colorAtA, colorAtB)
+    local midpoint = (pointA + pointB) / 2
+    for ropeIndex, height in ipairs(ROPE_HEIGHTS) do
+        addRopeSegment(
+            sideName .. "Rope" .. ropeIndex .. "_A",
+            pointA,
+            midpoint,
+            height,
+            colorAtA
+        )
+        addRopeSegment(
+            sideName .. "Rope" .. ropeIndex .. "_B",
+            midpoint,
+            pointB,
+            height,
+            colorAtB
+        )
+    end
+end
+
+local frontLeft = Vector3.new(RING_CENTER.X - HALF_POST, 0, RING_CENTER.Z + HALF_POST)
+local frontRight = Vector3.new(RING_CENTER.X + HALF_POST, 0, RING_CENTER.Z + HALF_POST)
+local backLeft = Vector3.new(RING_CENTER.X - HALF_POST, 0, RING_CENTER.Z - HALF_POST)
+local backRight = Vector3.new(RING_CENTER.X + HALF_POST, 0, RING_CENTER.Z - HALF_POST)
+
+addSideRopes("Front", frontLeft, frontRight, RED, NEUTRAL_ROPE)
+addSideRopes("Back", backLeft, backRight, NEUTRAL_ROPE, BLUE)
+addSideRopes("Left", backLeft, frontLeft, NEUTRAL_ROPE, RED)
+addSideRopes("Right", backRight, frontRight, BLUE, NEUTRAL_ROPE)
+
+-- CENTER SPAWN -----------------------------------------------------------
+-- This invisible SpawnLocation handles normal Roblox respawns. CharacterAdded
+-- also places each character precisely in the middle after loading.
+local spawnLocation = Instance.new("SpawnLocation")
+spawnLocation.Name = "RFC_CenterSpawn"
+spawnLocation.Size = Vector3.new(6, 0.2, 6)
+spawnLocation.CFrame = CFrame.new(RING_CENTER.X, MAT_TOP_Y + 0.1, RING_CENTER.Z)
+spawnLocation.Anchored = true
+spawnLocation.Transparency = 1
+spawnLocation.CanCollide = false
+spawnLocation.CanTouch = false
+spawnLocation.CanQuery = false
+spawnLocation.Neutral = true
+spawnLocation.Enabled = true
+spawnLocation.Duration = 0
+spawnLocation.AllowTeamChangeOnTouch = false
+spawnLocation.Parent = ring
+
+local configuredPlayers = {}
+
+local function moveCharacterToCenter(character)
+    task.spawn(function()
+        local root = character:WaitForChild("HumanoidRootPart", 10)
+        if not root or not character.Parent then
+            return
+        end
+
+        task.wait(0.15)
+        if not root.Parent or not character.Parent then
+            return
+        end
+
+        root.CFrame = CFrame.new(RING_CENTER.X, MAT_TOP_Y + 3.1, RING_CENTER.Z)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+local function setupPlayer(player)
+    if configuredPlayers[player] then
+        return
+    end
+    configuredPlayers[player] = true
+
+    player.RespawnLocation = spawnLocation
+    player.CharacterAdded:Connect(moveCharacterToCenter)
+
+    if player.Character then
+        moveCharacterToCenter(player.Character)
+    end
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
+for _, player in ipairs(Players:GetPlayers()) do
+    setupPlayer(player)
+end
