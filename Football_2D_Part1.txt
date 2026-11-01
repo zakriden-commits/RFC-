@@ -1,12 +1,19 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.2 (МЕНЮ + Матч 1 на 1 С БОТОМ)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.3 (МЕНЮ + Матч 1 на 1 С БОТОМ)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
+
+  ЧТО НОВОГО В 1.3:
+  • ЛКМ — ЧИСТАЯ физика контакта: курсор вообще НЕ влияет на направление удара
+  • Мяч откидывается строго от центра твоей фишки через центр мяча, с какой стороны ты подошёл
+  • Скошенные углы-отбойники + анти-застревание бота: бот вытаскивает мяч из угла или отходит
+  • Новая графика: объёмный мяч, футболист игрока и робот-бот с лицами, тенями и направлением
+  • После каждого гола — 7-секундный замедленный ПОВТОР, пропуск на ПРОБЕЛ или кнопку
 
   ЧТО НОВОГО В 1.2:
   • Фишки едут медленнее и по-настоящему плавно: разгон, инерция, скольжение при остановке
   • Удар стал физическим: мяч летит ОТ фишки через центр мяча; откуда зашёл — туда и полетел
-  • Курсор больше не разворачивает мяч сквозь фишку, а только подправляет угол удара
+  • Направление удара определяет только сторона касания фишки и мяча
   • Бот переписан в атаку: прессингует, идёт в отбор, ведёт мяч к твоим воротам и бьёт
 
   ЧТО ИСПРАВЛЕНО В 1.1:
@@ -24,7 +31,7 @@
   • Кнопка «ИГРАТЬ 1 на 1» + выбор сложности бота (Лёгкий / Средний / Сложный)
   • Полностью 2D-игра (НЕ на 3D-карте, всё рисуется интерфейсом)
   • Игрок и бот — круглые фишки, мяч в центре поля
-  • Удар на ЛКМ: мяч летит от твоей фишки через центр мяча; курсор подправляет угол
+  • Удар на ЛКМ: мяч строго от центра твоей фишки через центр мяча; курсор на удар не влияет
   • Умный ИИ бота: атакует, защищается, выбивает мяч, бьёт по углам ворот
   • Матч до 3 голов, время матча — 2 минуты (ничья по времени = золотой гол)
   • Большое поле с видом «всё поле / только я», табло, пауза, конец матча, реванш
@@ -51,6 +58,7 @@
   ЛКМ (отпустить) ........ удар по физике: зайди за мяч с нужной стороны и бей
   ЛКМ вдалеке от мяча .... короткий рывок в сторону курсора
   Shift .................. спринт
+  Пробел ................. в матче быстрый физический удар; в повторе — ПРОПУСТИТЬ повтор
   P или кнопка ⏸ ......... пауза
   Телефон ................ веди пальцем по полю + кнопка «УДАР»
 
@@ -82,11 +90,20 @@ for _, guiName in ipairs({ "ROBALL_GUI", "RFC_Football2D_GUI" }) do
 end
 
 --// Настройки игры (можешь крутить под себя) \\--
+-- Необязательно: если загрузишь свою сгенерированную картинку в Roblox как Image/Decal,
+-- впиши сюда её rbxassetid://... — она встанет на круг. Пусто = красивая рисованная графика из кода.
+local CUSTOM_FACE_IMAGES = {
+	PLAYER = "",
+	BOT = "",
+}
+
 local SETTINGS = {
 	WIN_GOALS    = 3,      -- матч до скольки голов
 	MATCH_TIME   = 120,    -- время матча в секундах (2 минуты)
 	PLAYER_SPEED = 285,    -- максимальная скорость фишки игрока (разгон плавный)
 	PLAYER_SPRINT = 360,   -- максимальная скорость на Shift
+	REPLAY_DURATION = 7,   -- повтор гола на экране ровно 7 секунд
+	REPLAY_SOURCE = 3.5,   -- из них берём последние 3.5 сек игры и показываем в 2 раза медленнее
 }
 
 --// Виртуальное поле (координаты игры, НЕ пиксели экрана) \\--
@@ -95,8 +112,9 @@ local GOAL_Y1, GOAL_Y2 = 210, 390        -- проём ворот по верт�
 local GOAL_CENTER_Y    = 300
 local PLAYER_R = 27                      -- радиус фишек
 local BALL_R   = 13                      -- радиус мяча
-local PLAYER_KICK_REACH = 62             -- насколько мяч может быть НЕ вплотную, но удар ЛКМ всё равно достанет
-local BOT_KICK_REACH = 16                -- бот бьёт только почти вплотную, честно
+local PLAYER_KICK_REACH = 16             -- удар только при почти настоящем касании кругов
+local BOT_KICK_REACH = 10                -- бот тоже бьёт только при касании
+local CORNER_CUT = 72                    -- скошенные углы: мяч и фишки не застревают в мёртвых углах
 local POSTS = {                          -- штанги
 	Vector2.new(0, GOAL_Y1), Vector2.new(0, GOAL_Y2),
 	Vector2.new(FIELD_W, GOAL_Y1), Vector2.new(FIELD_W, GOAL_Y2),
@@ -141,7 +159,7 @@ local COL = {
 }
 
 --// Состояние матча \\--
-local state = "Menu"            -- Menu / Countdown / Playing / Goal / Paused / Finished
+local state = "Menu"            -- Menu / Countdown / Playing / Goal / Replay / Paused / Finished
 local selectedDiffKey = "Medium"
 local currentDiff = DIFFICULTIES.Medium
 local cameraMode = "Full"               -- Full = видно всё поле; Close = крупный план за игроком
@@ -153,6 +171,9 @@ local botPos    = Vector2.new(800, 300)
 local botVel    = Vector2.new(0, 0)
 local ballPos   = Vector2.new(500, 300)
 local ballVel   = Vector2.new(0, 0)
+local ballRotation = 0
+local playerFacingAngle = 0
+local botFacingAngle = math.pi
 
 local playerScore, botScore = 0, 0
 local timeLeft = SETTINGS.MATCH_TIME
@@ -171,6 +192,27 @@ local botCommitTimer = 0                -- бот доводит начатую 
 local botPressTimer = 4                 -- периодические волны прессинга даже на чужой половине
 local botThinkTimer, botKickCooldown = 0, 0.5
 local ballIdleTimer = 0
+local botRecoveryTimer = 0
+local botRecoveryPoint = Vector2.new(500, 300)
+local botCornerTimer = 0
+local botStuckSampleTimer = 0
+local botStuckScore = 0
+local botLastSamplePos = botPos
+local botLastBallSamplePos = ballPos
+
+-- Запись последних секунд для повтора гола
+local replayFrames = {}
+local replayClock = 0
+local replaySampleTimer = 0
+local replayActive = false
+local replayTime = 0
+local replayDuration = SETTINGS.REPLAY_DURATION
+local replaySourceStart = 0
+local replaySourceEnd = 0
+local replayFrameIndex = 1
+local replaySkipRequested = false
+local lastScorer = "player"
+local replayLiveState = nil
 
 local keysDown = {}
 local touchActive = false
@@ -181,11 +223,12 @@ local toastToken = 0
 --// Объявления вперёд (функции и UI-элементы заполнятся ниже) \\--
 local startMatch, goToMenu, finishMatch, resetKickoff, startCountdown, onGoal, updateHUD, showToast
 local screenGui, menuFrame, gameFrame, fieldFrame
-local playerChip, botChip, ballFrame, aimLine
+local playerChip, botChip, playerDirMarker, botDirMarker, ballFrame, ballBody, aimLine
 local scoreLeftLabel, scoreRightLabel, timerLabel, diffBadgeLabel
 local powerBarBg, powerBarFill, countdownLabel, goalBanner, toastLabel
 local pauseOverlay, finishOverlay, finishTitle, finishScore, finishStats
 local diffDescLabel, cameraDescLabel, cameraGameButton, rainbowGradient
+local replayPanel, replayTitle, replayProgressFill, replaySkipButton
 local diffButtons = {}
 local cameraButtons = {}
 
@@ -204,15 +247,10 @@ local function unit2(v)
 	return v / m
 end
 
-local function rotate2(v, radians)
-	local c = math.cos(radians)
-	local s = math.sin(radians)
-	return Vector2.new(v.X * c - v.Y * s, v.X * s + v.Y * c)
-end
-
--- Подписанный угол от вектора a к вектору b (нужен физическому удару)
-local function signedAngle2(a, b)
-	return math.atan(a.X * b.Y - a.Y * b.X, a.X * b.X + a.Y * b.Y)
+-- Кратчайшая плавная интерполяция угла (для поворота персонажей и повтора)
+local function lerpAngle(a, b, alpha)
+	local diff = (b - a + math.pi) % (math.pi * 2) - math.pi
+	return a + diff * clamp(alpha, 0, 1)
 end
 
 -- Плавная физика фишки: скорость меняется не мгновенно, а с ускорением.
@@ -224,6 +262,41 @@ local function approachVelocity(current, desired, acceleration, dt)
 		return desired
 	end
 	return current + unit2(delta) * maxChange
+end
+
+-- Геометрия поля со скошенными углами: круг радиуса r не может забиться в мёртвый угол.
+local function clampToField(pos, r)
+	local p = Vector2.new(
+		clamp(pos.X, r, FIELD_W - r),
+		clamp(pos.Y, r, FIELD_H - r)
+	)
+	local need = CORNER_CUT + r * math.sqrt(2)
+	local tl = p.X + p.Y
+	if tl < need then
+		local add = (need - tl) / 2
+		p = Vector2.new(p.X + add, p.Y + add)
+	end
+	local tr = (FIELD_W - p.X) + p.Y
+	if tr < need then
+		local add = (need - tr) / 2
+		p = Vector2.new(p.X - add, p.Y + add)
+	end
+	local bl = p.X + (FIELD_H - p.Y)
+	if bl < need then
+		local add = (need - bl) / 2
+		p = Vector2.new(p.X + add, p.Y - add)
+	end
+	local br = (FIELD_W - p.X) + (FIELD_H - p.Y)
+	if br < need then
+		local add = (need - br) / 2
+		p = Vector2.new(p.X - add, p.Y - add)
+	end
+	return p
+end
+
+local function isInCornerZone(pos, pad)
+	return (pos.X < pad or pos.X > FIELD_W - pad)
+		and (pos.Y < pad or pos.Y > FIELD_H - pad)
 end
 
 local function create(className, props, parent)
@@ -715,7 +788,7 @@ makeText(menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ROBALL • ЧАСТЬ 1 • v1.2",
+	Text = "ROBALL • ЧАСТЬ 1 • v1.3",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -934,6 +1007,23 @@ end
 penaltyBox(true)
 penaltyBox(false)
 
+-- Скошенные углы-отбойники: белая диагональ честно показывает новую геометрию
+local cornerLineData = {
+	{ 36, 36, -45 }, { 964, 36, 45 }, { 36, 564, 45 }, { 964, 564, -45 },
+}
+for _, c in ipairs(cornerLineData) do
+	create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = fieldPosToUI(Vector2.new(c[1], c[2])),
+		Size = UDim2.new((CORNER_CUT * 1.414) / FIELD_W, 0, 0, 3),
+		Rotation = c[3],
+		BackgroundColor3 = COL.White,
+		BackgroundTransparency = 0.35,
+		BorderSizePixel = 0,
+		ZIndex = 3,
+	}, fieldFrame)
+end
+
 -- Ворота (сетки слева и справа, торчат за поле)
 local function makeGoal(isLeft, color)
 	local goal = create("Frame", {
@@ -991,36 +1081,174 @@ aimLine = create("Frame", {
 }, fieldFrame)
 addCorner(aimLine, 1, 0)
 
--- Круглые фишки
-local function makeChip(color, numberText, nameText)
+-- Персонажи и мяч: объёмная рисованная графика из GUI-фигур (картинки не нужны).
+local function addDisc(parent, name, cx, cy, size, color, transparency, z)
+	local disc = create("Frame", {
+		Name = name,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(cx, cy),
+		Size = UDim2.fromScale(size, size),
+		BackgroundColor3 = color,
+		BackgroundTransparency = transparency or 0,
+		BorderSizePixel = 0,
+		ZIndex = z or 3,
+	}, parent)
+	addCorner(disc, 1, 0)
+	return disc
+end
+
+local function makeChip(isBot)
+	local teamColor = isBot and COL.Bot or COL.Player
+	local numberText = isBot and "9" or "10"
+	local nameText = isBot and "БОТ" or "ВЫ"
+
 	local chip = create("Frame", {
+		Name = isBot and "BotChip" or "PlayerChip",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Size = fieldSizeToUI(PLAYER_R * 2, PLAYER_R * 2),
-		BackgroundColor3 = color,
+		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		ZIndex = 8,
 	}, fieldFrame)
-	addCorner(chip, 1, 0)
-	addStroke(chip, COL.White, 3, 0)
-	-- Внутренний ободок
-	local inner = create("Frame", {
+
+	-- Мягкая тень на газоне
+	addDisc(chip, "Shadow", 0.57, 0.61, 0.94, COL.Black, 0.74, 1)
+
+	-- Круглое тело/форма с градиентом и объёмом
+	local body = create("Frame", {
+		Name = "Body",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromScale(0.68, 0.68),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = teamColor,
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		ZIndex = 2,
+	}, chip)
+	addCorner(body, 1, 0)
+	addStroke(body, COL.White, 3, 0)
+	addGradient(body, teamColor:Lerp(COL.White, 0.32), teamColor:Lerp(COL.Black, 0.30), 90)
+	addDisc(body, "Highlight", 0.30, 0.24, 0.44, COL.White, 0.80, 3)
+	addDisc(body, "Shade", 0.72, 0.78, 0.56, COL.Black, 0.88, 3)
+	local ring = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.79, 0.79),
 		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ZIndex = 3,
+	}, body)
+	addCorner(ring, 1, 0)
+	addStroke(ring, COL.White, 2, 0.42)
+
+	local customId = isBot and CUSTOM_FACE_IMAGES.BOT or CUSTOM_FACE_IMAGES.PLAYER
+	if customId and customId ~= "" then
+		-- Твоя загруженная в Roblox сгенерированная картинка на круге
+		local img = create("ImageLabel", {
+			Name = "CustomFace",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(0.94, 0.94),
+			BackgroundTransparency = 1,
+			Image = customId,
+			ScaleType = Enum.ScaleType.Crop,
+			ZIndex = 5,
+		}, body)
+		addCorner(img, 1, 0)
+	elseif isBot then
+		-- РОБОТ-БОТ: антенна, тёмный визор, светящиеся глаза и уши-диски
+		addDisc(body, "EarL", 0.08, 0.52, 0.22, Color3.fromRGB(120, 132, 145), 0, 4)
+		addDisc(body, "EarR", 0.92, 0.52, 0.22, Color3.fromRGB(120, 132, 145), 0, 4)
+		create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.13),
+			Size = UDim2.fromScale(0.045, 0.17),
+			BackgroundColor3 = Color3.fromRGB(35, 42, 52),
+			BorderSizePixel = 0,
+			ZIndex = 4,
+		}, body)
+		addDisc(body, "AntennaTip", 0.5, 0.07, 0.14, COL.Yellow, 0, 5)
+		local visor = create("Frame", {
+			Name = "Visor",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.40),
+			Size = UDim2.fromScale(0.69, 0.35),
+			BackgroundColor3 = Color3.fromRGB(16, 23, 33),
+			BorderSizePixel = 0,
+			ZIndex = 5,
+		}, body)
+		addCorner(visor, 0.5, 0)
+		addStroke(visor, Color3.fromRGB(95, 240, 255), 1, 0.35)
+		addDisc(body, "EyeGlowL", 0.36, 0.40, 0.20, Color3.fromRGB(95, 240, 255), 0.76, 6)
+		addDisc(body, "EyeGlowR", 0.64, 0.40, 0.20, Color3.fromRGB(95, 240, 255), 0.76, 6)
+		addDisc(body, "EyeL", 0.36, 0.40, 0.115, Color3.fromRGB(95, 240, 255), 0, 7)
+		addDisc(body, "EyeR", 0.64, 0.40, 0.115, Color3.fromRGB(95, 240, 255), 0, 7)
+		local mouth = create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.565),
+			Size = UDim2.fromScale(0.24, 0.035),
+			BackgroundColor3 = Color3.fromRGB(95, 240, 255),
+			BackgroundTransparency = 0.10,
+			BorderSizePixel = 0,
+			ZIndex = 6,
+		}, body)
+		addCorner(mouth, 1, 0)
+		addDisc(body, "Core", 0.5, 0.68, 0.13, Color3.fromRGB(95, 240, 255), 0.05, 5)
+	else
+		-- ФУТБОЛИСТ ИГРОКА: форма с полосой и рукавами, голова с причёской, бутсы
+		local stripe = create("Frame", {
+			Name = "JerseyStripe",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(0.18, 1.25),
+			Rotation = -18,
+			BackgroundColor3 = COL.White,
+			BackgroundTransparency = 0.20,
+			BorderSizePixel = 0,
+			ZIndex = 3,
+		}, body)
+		addDisc(body, "SleeveL", 0.17, 0.38, 0.26, COL.White, 0.08, 4)
+		addDisc(body, "SleeveR", 0.83, 0.38, 0.26, COL.White, 0.08, 4)
+		local head = addDisc(body, "Head", 0.5, 0.36, 0.37, Color3.fromRGB(245, 199, 160), 0, 5)
+		head.ClipsDescendants = true
+		create("Frame", {
+			Name = "Hair",
+			Size = UDim2.fromScale(1, 0.48),
+			BackgroundColor3 = Color3.fromRGB(74, 48, 28),
+			BorderSizePixel = 0,
+			ZIndex = 6,
+		}, head)
+		addDisc(head, "HairShine", 0.32, 0.24, 0.28, Color3.fromRGB(120, 82, 48), 0.15, 7)
+		addDisc(body, "BootL", 0.35, 0.89, 0.15, Color3.fromRGB(20, 24, 32), 0, 5)
+		addDisc(body, "BootR", 0.65, 0.89, 0.15, Color3.fromRGB(20, 24, 32), 0, 5)
+	end
+
+	-- Маркер носа/бутсы: показывает, куда фишка сейчас движется
+	local marker = create("Frame", {
+		Name = "DirectionMarker",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(isBot and 0.11 or 0.89, 0.5),
+		Size = UDim2.fromScale(0.18, 0.18),
+		Rotation = 45,
+		BackgroundColor3 = isBot and Color3.fromRGB(95, 240, 255) or COL.Yellow,
 		BorderSizePixel = 0,
 		ZIndex = 9,
 	}, chip)
-	addCorner(inner, 1, 0)
-	addStroke(inner, COL.White, 2, 0.35)
-	-- Номер
+	addCorner(marker, 0.25, 0)
+	addStroke(marker, COL.Black, 1, 0.25)
+
+	-- Номер внизу круга, чтобы не закрывать лицо
 	makeText(chip, {
-		Size = UDim2.fromScale(1, 1),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, isBot and 0.79 or 0.70),
+		Size = UDim2.fromScale(0.72, 0.34),
 		Text = numberText,
 		Font = Enum.Font.GothamBlack,
 		TextSize = 22,
 		TextScaled = true,
 		TextColor3 = COL.White,
+		TextStrokeColor3 = COL.Black,
+		TextStrokeTransparency = 0.35,
 		ZIndex = 10,
 	})
 	-- Подпись над фишкой
@@ -1036,33 +1264,79 @@ local function makeChip(color, numberText, nameText)
 		TextStrokeTransparency = 0.3,
 		ZIndex = 10,
 	})
-	return chip
+	return chip, marker
 end
-playerChip = makeChip(COL.Player, "10", "ВЫ")
-botChip = makeChip(COL.Bot, "9", "БОТ")
+playerChip, playerDirMarker = makeChip(false)
+botChip, botDirMarker = makeChip(true)
 
--- Мяч
+-- Объёмный мяч: тень отдельно, вращающееся тело с панелями, швами и бликом
 ballFrame = create("Frame", {
 	Name = "Ball",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2),
-	BackgroundColor3 = COL.White,
+	BackgroundTransparency = 1,
 	BorderSizePixel = 0,
 	ZIndex = 11,
 }, fieldFrame)
-addCorner(ballFrame, 1, 0)
-addStroke(ballFrame, COL.Black, 2, 0)
-for _, d in ipairs({ {0.5, 0.5, 0.34}, {0.2, 0.25, 0.2}, {0.8, 0.3, 0.2}, {0.3, 0.8, 0.2}, {0.75, 0.78, 0.2} }) do
-	local dot = create("Frame", {
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(d[1], d[2]),
-		Size = UDim2.fromScale(d[3], d[3]),
-		BackgroundColor3 = COL.Black,
+addDisc(ballFrame, "Shadow", 0.59, 0.64, 0.90, COL.Black, 0.74, 1)
+ballBody = create("Frame", {
+	Name = "BallBody",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = COL.White,
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+	ZIndex = 2,
+}, ballFrame)
+addCorner(ballBody, 1, 0)
+addStroke(ballBody, Color3.fromRGB(25, 28, 34), 2, 0)
+addGradient(ballBody, COL.White, Color3.fromRGB(176, 184, 194), 90)
+local ballRing = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(0.70, 0.70),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, ballBody)
+addCorner(ballRing, 1, 0)
+addStroke(ballRing, Color3.fromRGB(90, 98, 108), 1, 0.55)
+-- Швы от центра к панелям
+for i = 0, 4 do
+	local a = -90 + i * 72
+	create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(0.37, 0, 0, 1),
+		Rotation = a,
+		BackgroundColor3 = Color3.fromRGB(90, 98, 108),
+		BackgroundTransparency = 0.35,
 		BorderSizePixel = 0,
-		ZIndex = 12,
-	}, ballFrame)
-	addCorner(dot, 1, 0)
+		ZIndex = 3,
+	}, ballBody)
 end
+-- Центральная панель-ромб и чёрные панели вокруг
+local centerPatch = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(0.30, 0.30),
+	Rotation = 45,
+	BackgroundColor3 = Color3.fromRGB(20, 23, 29),
+	BorderSizePixel = 0,
+	ZIndex = 4,
+}, ballBody)
+addCorner(centerPatch, 0.22, 0)
+for i = 0, 4 do
+	local rad = math.rad(-90 + i * 72)
+	addDisc(ballBody, "Patch", 0.5 + math.cos(rad) * 0.36, 0.5 + math.sin(rad) * 0.36, 0.24,
+		Color3.fromRGB(20, 23, 29), 0, 4)
+	local edgeRad = rad + math.rad(36)
+	addDisc(ballBody, "EdgePatch", 0.5 + math.cos(edgeRad) * 0.50, 0.5 + math.sin(edgeRad) * 0.50, 0.18,
+		Color3.fromRGB(20, 23, 29), 0, 4)
+end
+addDisc(ballBody, "Highlight", 0.29, 0.23, 0.36, COL.White, 0.22, 6)
+addDisc(ballBody, "Shade", 0.76, 0.80, 0.50, Color3.fromRGB(70, 78, 90), 0.84, 5)
 
 -- Полоса силы удара
 powerBarBg = create("Frame", {
@@ -1153,6 +1427,63 @@ goalBanner = makeText(gameFrame, {
 })
 local goalBannerScale = Instance.new("UIScale")
 goalBannerScale.Parent = goalBanner
+
+-- Панель замедленного повтора гола
+replayPanel = create("Frame", {
+	Name = "ReplayPanel",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.096),
+	Size = UDim2.fromScale(0.35, 0.07),
+	BackgroundColor3 = Color3.fromRGB(8, 12, 20),
+	BackgroundTransparency = 0.22,
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 42,
+}, gameFrame)
+addCorner(replayPanel, 0, 12)
+addStroke(replayPanel, COL.White, 1, 0.65)
+replayTitle = makeText(replayPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.04),
+	Size = UDim2.fromScale(0.94, 0.52),
+	Text = "📺 ПОВТОР ГОЛА",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextScaled = true,
+	TextColor3 = COL.White,
+	ZIndex = 43,
+})
+local replayProgressBg = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.68),
+	Size = UDim2.fromScale(0.86, 0.16),
+	BackgroundColor3 = Color3.fromRGB(35, 43, 55),
+	BorderSizePixel = 0,
+	ZIndex = 43,
+}, replayPanel)
+addCorner(replayProgressBg, 1, 0)
+replayProgressFill = create("Frame", {
+	Size = UDim2.fromScale(0, 1),
+	BackgroundColor3 = COL.Yellow,
+	BorderSizePixel = 0,
+	ZIndex = 44,
+}, replayProgressBg)
+addCorner(replayProgressFill, 1, 0)
+replaySkipButton = makeButton(gameFrame, {
+	Name = "ReplaySkipButton",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.fromScale(0.5, 0.955),
+	Size = UDim2.fromScale(0.23, 0.05),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "⏭ ПРОПУСТИТЬ  [ПРОБЕЛ]",
+	TextSize = 17,
+	TextScaled = true,
+	TextWrapped = false,
+	Visible = false,
+	ZIndex = 43,
+})
+addCorner(replaySkipButton, 0, 12)
+addStroke(replaySkipButton, COL.White, 1, 0.55)
 
 --------------------------------------------------------------------------------
 --  Оверлей паузы
@@ -1335,6 +1666,14 @@ function resetKickoff(kickoffTeam)
 	ballVel = Vector2.new(0, 0)
 	playerVel = Vector2.new(0, 0)
 	botVel = Vector2.new(0, 0)
+	ballRotation = 0
+	playerFacingAngle = 0
+	botFacingAngle = math.pi
+	replayFrames = {}
+	replayClock = 0
+	replaySampleTimer = 0
+	replayActive = false
+	replaySkipRequested = false
 	if kickoffTeam == "player" then
 		playerPos = Vector2.new(425, 300)
 		botPos = Vector2.new(790, 300)
@@ -1351,6 +1690,12 @@ function resetKickoff(kickoffTeam)
 	botMode = (kickoffTeam == "Bot") and "Attack" or "Challenge"
 	botCommitTimer = (kickoffTeam == "Bot") and 2.5 or 0
 	botPressTimer = 4
+	botRecoveryTimer = 0
+	botCornerTimer = 0
+	botStuckSampleTimer = 0
+	botStuckScore = 0
+	botLastSamplePos = botPos
+	botLastBallSamplePos = ballPos
 	botThinkTimer = 0
 	botKickCooldown = 0.6
 	ballIdleTimer = 0
@@ -1400,6 +1745,8 @@ function startMatch()
 	pauseOverlay.Visible = false
 	finishOverlay.Visible = false
 	goalBanner.Visible = false
+	if replayPanel then replayPanel.Visible = false end
+	if replaySkipButton then replaySkipButton.Visible = false end
 
 	resetKickoff("player") -- первый мяч с центра — у игрока, честно 😉
 	updateHUD()
@@ -1416,6 +1763,9 @@ function goToMenu()
 	countdownLabel.Visible = false
 	goalBanner.Visible = false
 	toastLabel.Visible = false
+	replayActive = false
+	if replayPanel then replayPanel.Visible = false end
+	if replaySkipButton then replaySkipButton.Visible = false end
 	gameFrame.Visible = false
 	menuFrame.Visible = true
 end
@@ -1436,6 +1786,8 @@ function finishMatch()
 	cancelCharge()
 	countdownLabel.Visible = false
 	goalBanner.Visible = false
+	if replayPanel then replayPanel.Visible = false end
+	if replaySkipButton then replaySkipButton.Visible = false end
 
 	local playerWon = playerScore > botScore
 	if playerWon then
@@ -1484,11 +1836,116 @@ local function spawnConfetti()
 	end
 end
 
+-- Запись последних секунд матча для замедленного повтора.
+local function recordReplayFrame(dt)
+	if state ~= "Playing" and state ~= "Goal" then
+		return
+	end
+	replayClock = replayClock + dt
+	replaySampleTimer = replaySampleTimer - dt
+	if replaySampleTimer > 0 then
+		return
+	end
+	replaySampleTimer = 1 / 30
+	table.insert(replayFrames, {
+		t = replayClock,
+		p = playerPos,
+		b = botPos,
+		ball = ballPos,
+		rot = ballRotation,
+		pf = playerFacingAngle,
+		bf = botFacingAngle,
+	})
+	local cutoff = replayClock - (SETTINGS.REPLAY_SOURCE + 1.6)
+	while #replayFrames > 2 and replayFrames[1].t < cutoff do
+		table.remove(replayFrames, 1)
+	end
+end
+
+local function hideReplayUI()
+	if replayPanel then
+		replayPanel.Visible = false
+	end
+	if replaySkipButton then
+		replaySkipButton.Visible = false
+	end
+end
+
+local function completeGoalSequence()
+	if state ~= "Goal" and state ~= "Replay" then
+		return
+	end
+	replayActive = false
+	hideReplayUI()
+	goalBanner.Visible = false
+	if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS or overtime then
+		finishMatch()
+	else
+		resetKickoff(lastScorer == "player" and "Bot" or "player")
+		startCountdown()
+	end
+end
+
+local function startGoalReplay()
+	if #replayFrames < 2 then
+		completeGoalSequence()
+		return
+	end
+	replayLiveState = {
+		p = playerPos, b = botPos, ball = ballPos,
+		pv = playerVel, bv = botVel, ballv = ballVel,
+		rot = ballRotation, pf = playerFacingAngle, bf = botFacingAngle,
+	}
+	replaySourceEnd = replayFrames[#replayFrames].t
+	replaySourceStart = math.max(replayFrames[1].t, replaySourceEnd - SETTINGS.REPLAY_SOURCE)
+	replayFrameIndex = 1
+	while replayFrameIndex < #replayFrames and replayFrames[replayFrameIndex + 1].t <= replaySourceStart do
+		replayFrameIndex = replayFrameIndex + 1
+	end
+	local sourceDuration = replaySourceEnd - replaySourceStart
+	if sourceDuration < 0.2 then
+		completeGoalSequence()
+		return
+	end
+	replayDuration = SETTINGS.REPLAY_DURATION -- ровно 7 секунд на экране
+	replayTime = 0
+	replayActive = true
+	state = "Replay"
+	goalBanner.Visible = false
+	replayPanel.Visible = true
+	replaySkipButton.Visible = true
+	replayTitle.Text = (lastScorer == "player") and "📺 ПОВТОР ТВОЕГО ГОЛА" or "📺 ПОВТОР ГОЛА БОТА"
+	replayProgressFill.Size = UDim2.fromScale(0, 1)
+end
+
+local function endGoalReplay()
+	if state ~= "Replay" then
+		return
+	end
+	replayActive = false
+	hideReplayUI()
+	if replayLiveState then
+		playerPos = replayLiveState.p
+		botPos = replayLiveState.b
+		ballPos = replayLiveState.ball
+		playerVel = replayLiveState.pv
+		botVel = replayLiveState.bv
+		ballVel = replayLiveState.ballv
+		ballRotation = replayLiveState.rot
+		playerFacingAngle = replayLiveState.pf
+		botFacingAngle = replayLiveState.bf
+	end
+	completeGoalSequence()
+end
+
 function onGoal(scorer) -- scorer: "player" или "Bot"
 	if state ~= "Playing" then
 		return
 	end
 	state = "Goal"
+	lastScorer = scorer
+	replaySkipRequested = false
+	replayActive = false
 	cancelCharge()
 	if scorer == "player" then
 		playerScore = playerScore + 1
@@ -1508,48 +1965,37 @@ function onGoal(scorer) -- scorer: "player" или "Bot"
 	end
 
 	local my = matchToken
-	task.delay(1.8, function()
-		if matchToken ~= my then return end
+	task.delay(0.8, function()
+		if matchToken ~= my or state ~= "Goal" then return end
 		goalBanner.Visible = false
-		if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS or overtime then
-			finishMatch()
+		if replaySkipRequested then
+			completeGoalSequence()
 		else
-			-- Мяч с центра получает пропустившая команда
-			resetKickoff(scorer == "player" and "Bot" or "player")
-			startCountdown()
+			startGoalReplay()
 		end
 	end)
 end
 
--- ФИЗИКА УДАРА:
--- Главное направление идёт ОТ ЦЕНТРА ФИШКИ ЧЕРЕЗ ЦЕНТР МЯЧА.
--- Зашёл слева — мяч полетит вправо. Зашёл справа — влево (хоть в свои ворота).
--- Сверху/снизу/под углом — мяч уйдёт по той же линии контакта.
--- Курсор/цель может только довернуть удар на ограниченный угол и НЕ может
--- развернуть мяч назад сквозь саму фишку. Так удар зависит от места касания.
-local function getKickDirection(isBot, aimPoint)
+-- ЧИСТАЯ ФИЗИКА КОНТАКТА (БЕЗ КУРСОРА):
+-- Направление удара = линия ЦЕНТР ФИШКИ -> ЦЕНТР МЯЧА в момент касания.
+-- Подошёл слева — мяч откинется вправо. Подошёл справа — влево.
+-- Подошёл снизу — вверх, сверху — вниз, по диагонали — по той же диагонали.
+-- Курсор, старая скорость мяча и боковая скорость фишки направление НЕ меняют.
+local function getContactDirection(isBot)
 	local chipPos = isBot and botPos or playerPos
 	local chipVel = isBot and botVel or playerVel
-	local contactDir = unit2(ballPos - chipPos)
-	if contactDir.Magnitude < 0.01 then
-		contactDir = unit2(chipVel)
+	local dir = unit2(ballPos - chipPos)
+	if dir.Magnitude < 0.01 then
+		dir = unit2(chipVel)
 	end
-	if contactDir.Magnitude < 0.01 then
-		contactDir = isBot and Vector2.new(-1, 0) or Vector2.new(1, 0)
+	if dir.Magnitude < 0.01 then
+		dir = isBot and Vector2.new(-1, 0) or Vector2.new(1, 0)
 	end
-
-	local aimDir = unit2(aimPoint - ballPos)
-	if aimDir.Magnitude < 0.01 then
-		return contactDir
-	end
-
-	local maxTurn = math.rad(isBot and 68 or 58)
-	local turn = clamp(signedAngle2(contactDir, aimDir), -maxTurn, maxTurn)
-	return rotate2(contactDir, turn)
+	return dir
 end
 
--- Удар по мячу. Возвращает true, если мяч был в радиусе удара.
-local function kickBall(isBot, aimPoint, power01)
+-- Удар по мячу только при касании кругов. Возвращает true, если удар произошёл.
+local function kickBall(isBot, power01)
 	local chipPos = isBot and botPos or playerPos
 	local chipVel = isBot and botVel or playerVel
 	local toBall = ballPos - chipPos
@@ -1557,7 +2003,11 @@ local function kickBall(isBot, aimPoint, power01)
 	if toBall.Magnitude > reach then
 		return false
 	end
-	local dir = getKickDirection(isBot, aimPoint)
+
+	local dir = getContactDirection(isBot)
+	-- Ставим мяч точно на поверхность контакта: никаких случайных перекрытий кругов.
+	ballPos = chipPos + dir * (PLAYER_R + BALL_R)
+
 	local p = clamp(power01, 0, 1)
 	local speed
 	if isBot then
@@ -1565,8 +2015,18 @@ local function kickBall(isBot, aimPoint, power01)
 	else
 		speed = 280 + p * 760
 	end
-	-- Скорость фишки чуть добавляется мячу, но не ломает линию физического удара
-	ballVel = dir * speed + chipVel * 0.12
+	-- Только скорость фишки ВДОЛЬ линии контакта усиливает удар; боковая скорость его не уводит.
+	local approachSpeed = math.max(0, chipVel:Dot(dir))
+	speed = math.min(speed + approachSpeed * 0.35, 1120)
+	ballVel = dir * speed
+
+	-- Лёгкая физическая отдача самой фишке
+	if isBot then
+		botVel = botVel - dir * 18
+	else
+		playerVel = playerVel - dir * 18
+	end
+
 	if isBot then
 		shotsBot = shotsBot + 1
 	else
@@ -1589,22 +2049,16 @@ local function releaseKick()
 		return
 	end
 	local power = math.max(chargePower, 0.25) -- быстрый клик тоже нормально бьёт
-	local aim
-	if chargeAimToGoal then
-		-- Телефон/Пробел: цель — угол ворот бота, но итог всё равно ограничивает физика контакта
-		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
-		aim = Vector2.new(FIELD_W, cornerY)
-	else
-		aim = screenToField(mouseGuiPos())
-	end
+	-- Курсор нужен только если мяча рядом нет и вместо удара получится рывок.
+	local fallbackAim = chargeAimToGoal and Vector2.new(FIELD_W, GOAL_CENTER_Y) or screenToField(mouseGuiPos())
 	isCharging = false
 	powerBarBg.Visible = false
 	aimLine.Visible = false
 
-	if not kickBall(false, aim, power) then
-		-- Мяч далеко — вместо удара делаем рывок к курсору
+	if not kickBall(false, power) then
+		-- Мяч не касается фишки — вместо удара делаем рывок к курсору
 		if dashCooldown <= 0 then
-			local d = unit2(aim - playerPos)
+			local d = unit2(fallbackAim - playerPos)
 			if d.Magnitude > 0.01 then
 				dashDir = d
 				dashTime = 0.18
@@ -1631,6 +2085,54 @@ local function botStep(dt)
 		botPressTimer = rng:NextNumber(6.5, 9.5)
 	end
 	local d = currentDiff
+	botRecoveryTimer = math.max(0, botRecoveryTimer - dt)
+
+	local function startBotRecovery(fromPos, duration)
+		if botRecoveryTimer > 0 then
+			return
+		end
+		botRecoveryTimer = duration or 1.15
+		local toCenter = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - fromPos)
+		if toCenter.Magnitude < 0.01 then
+			toCenter = Vector2.new(1, 0)
+		end
+		botRecoveryPoint = clampToField(fromPos + toCenter * 190, PLAYER_R)
+		botTargetPos = botRecoveryPoint
+		botCornerTimer = 0
+		botStuckScore = 0
+		botThinkTimer = 0
+	end
+
+	-- Если мяч почти стоит в углу, а бот его подпирает, бот обязан отойти.
+	local stuckBallDist = (ballPos - botPos).Magnitude
+	if isInCornerZone(ballPos, 140) and ballVel.Magnitude < 55 and stuckBallDist < 145 then
+		botCornerTimer = botCornerTimer + dt
+	else
+		botCornerTimer = math.max(0, botCornerTimer - dt * 2)
+	end
+	if botCornerTimer > 0.75 then
+		startBotRecovery(ballPos, 1.25)
+	end
+
+	-- Общий контроль застревания: бот хочет ехать, но за 0.45 сек почти не сдвинулся.
+	botStuckSampleTimer = botStuckSampleTimer + dt
+	if botStuckSampleTimer >= 0.45 then
+		local botMoved = (botPos - botLastSamplePos).Magnitude
+		local ballMoved = (ballPos - botLastBallSamplePos).Magnitude
+		local wantsToMove = (botTargetPos - botPos).Magnitude > 38
+		local cornerBallSlow = isInCornerZone(ballPos, 140) and ballMoved < 11 and stuckBallDist < 145
+		if botRecoveryTimer <= 0 and ((wantsToMove and botMoved < 10) or cornerBallSlow) then
+			botStuckScore = botStuckScore + 1
+		else
+			botStuckScore = math.max(0, botStuckScore - 1)
+		end
+		if botStuckScore >= 2 then
+			startBotRecovery(cornerBallSlow and ballPos or botPos, 1.15)
+		end
+		botLastSamplePos = botPos
+		botLastBallSamplePos = ballPos
+		botStuckSampleTimer = 0
+	end
 
 	-- «Мозг» бота просыпается раз в Reaction секунд (у сложного — чаще)
 	if botThinkTimer <= 0 then
@@ -1640,10 +2142,7 @@ local function botStep(dt)
 		local distToBall = (ballPos - botPos).Magnitude
 		local reachTime = clamp(distToBall / math.max(d.Speed, 1), 0, 0.85)
 		local predicted = ballPos + ballVel * reachTime * ((0.25 + d.Predict) * 0.78)
-		predicted = Vector2.new(
-			clamp(predicted.X, BALL_R, FIELD_W - BALL_R),
-			clamp(predicted.Y, BALL_R, FIELD_H - BALL_R)
-		)
+		predicted = clampToField(predicted, BALL_R)
 
 		local botDist = (predicted - botPos).Magnitude
 		local playerDist = (predicted - playerPos).Magnitude
@@ -1683,7 +2182,10 @@ local function botStep(dt)
 		-- Куда бот ХОЧЕТ отправить мяч. Отсюда считается и заход за мяч:
 		-- для физического удара бот встаёт С ПРОТИВОПОЛОЖНОЙ стороны.
 		local attackTarget
-		if ballPos.X > 820 then
+		if isInCornerZone(predicted, 140) then
+			-- Сначала вытащить мяч из угла в открытую зону, атака уже потом
+			attackTarget = Vector2.new((predicted.X < FIELD_W / 2) and 300 or 700, (predicted.Y < FIELD_H / 2) and 215 or 385)
+		elseif ballPos.X > 820 then
 			attackTarget = Vector2.new(330, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
 		elseif predicted.X < d.ShootX then
 			local cornerY = (playerPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
@@ -1723,6 +2225,12 @@ local function botStep(dt)
 		end
 	end
 
+	if botRecoveryTimer > 0 then
+		botMode = "Recover"
+		botTargetPos = botRecoveryPoint
+	end
+	botTargetPos = clampToField(botTargetPos, PLAYER_R)
+
 	-- Движение бота: тот же физический подход, что у игрока.
 	local toTarget = botTargetPos - botPos
 	local targetDist = toTarget.Magnitude
@@ -1748,19 +2256,20 @@ local function botStep(dt)
 		botVel = Vector2.new(0, 0)
 	end
 	botPos = botPos + botVel * dt
-	local clampedBotPos = Vector2.new(
-		clamp(botPos.X, PLAYER_R, FIELD_W - PLAYER_R),
-		clamp(botPos.Y, PLAYER_R, FIELD_H - PLAYER_R)
-	)
+	local clampedBotPos = clampToField(botPos, PLAYER_R)
 	-- У борта скорость в стену гаснет, а вдоль борта фишка скользит
 	if clampedBotPos.X ~= botPos.X then botVel = Vector2.new(0, botVel.Y) end
 	if clampedBotPos.Y ~= botPos.Y then botVel = Vector2.new(botVel.X, 0) end
 	botPos = clampedBotPos
 
 	-- Решение об ударе
-	if botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
+	if botRecoveryTimer <= 0 and botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + BOT_KICK_REACH then
 		local aim, power
-		if ballPos.X > 820 then
+		if isInCornerZone(ballPos, 140) then
+			-- Не добиваем мяч в угол: цель только открытая зона внутри поля
+			aim = Vector2.new((ballPos.X < FIELD_W / 2) and 300 or 700, (ballPos.Y < FIELD_H / 2) and 215 or 385)
+			power = 0.62
+		elseif ballPos.X > 820 then
 			-- Опасно у своих ворот — вынос на фланг, подальше от игрока
 			aim = Vector2.new(300, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
 			power = 0.76
@@ -1782,13 +2291,14 @@ local function botStep(dt)
 		local contactDirNow = unit2(ballPos - botPos)
 		local alignmentNow = contactDirNow:Dot(desiredDir)
 		local emergency = ballPos.X > 845 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180
-		local minAlignment = -0.15 + d.Aggression * 0.50
+		local minAlignment = clamp(0.68 - d.AimError * 0.026, 0.02, 0.52) -- сложный бот ждёт более точный заход за мяч
+		if isInCornerZone(ballPos, 140) then
+			minAlignment = math.max(minAlignment, 0.45)
+		end
 
 		if alignmentNow >= minAlignment or (emergency and alignmentNow > -0.35) then
-			local errRad = math.rad(rng:NextNumber(-d.AimError, d.AimError))
-			local finalDir = rotate2(desiredDir, errRad)
-			local finalAim = ballPos + finalDir * 220
-			if kickBall(true, finalAim, power) then
+			-- Бот тоже бьёт только по линии контакта своих кругов; неточность даёт сам заход, а не магия.
+			if kickBall(true, power) then
 				botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
 				-- После ведения/выноса бот продолжает атаку за мячом
 				botCommitTimer = math.max(botCommitTimer, (ballPos.X > 820) and 1.7 or 2.3)
@@ -1856,10 +2366,7 @@ local function playerStep(dt)
 	end
 
 	playerPos = playerPos + playerVel * dt
-	local clampedPlayerPos = Vector2.new(
-		clamp(playerPos.X, PLAYER_R, FIELD_W - PLAYER_R),
-		clamp(playerPos.Y, PLAYER_R, FIELD_H - PLAYER_R)
-	)
+	local clampedPlayerPos = clampToField(playerPos, PLAYER_R)
 	-- У борта скорость в стену гаснет, а вдоль борта фишка скользит
 	if clampedPlayerPos.X ~= playerPos.X then playerVel = Vector2.new(0, playerVel.Y) end
 	if clampedPlayerPos.Y ~= playerPos.Y then playerVel = Vector2.new(playerVel.X, 0) end
@@ -1882,8 +2389,8 @@ local function resolveChipChip()
 			playerVel = playerVel + n * (closingSpeed / 2)
 			botVel = botVel - n * (closingSpeed / 2)
 		end
-		playerPos = Vector2.new(clamp(playerPos.X, PLAYER_R, FIELD_W - PLAYER_R), clamp(playerPos.Y, PLAYER_R, FIELD_H - PLAYER_R))
-		botPos = Vector2.new(clamp(botPos.X, PLAYER_R, FIELD_W - PLAYER_R), clamp(botPos.Y, PLAYER_R, FIELD_H - PLAYER_R))
+		playerPos = clampToField(playerPos, PLAYER_R)
+		botPos = clampToField(botPos, PLAYER_R)
 	end
 end
 
@@ -1907,12 +2414,42 @@ local function inGoalMouth(y)
 	return y > GOAL_Y1 and y < GOAL_Y2
 end
 
+local function collideBallCorner(sx, sy)
+	local dx = (sx > 0) and ballPos.X or (FIELD_W - ballPos.X)
+	local dy = (sy > 0) and ballPos.Y or (FIELD_H - ballPos.Y)
+	if dx > 190 or dy > 190 then
+		return
+	end
+	local need = CORNER_CUT + BALL_R * math.sqrt(2)
+	local sum = dx + dy
+	if sum >= need then
+		return
+	end
+	local inward = Vector2.new(sx, sy) / math.sqrt(2)
+	ballPos = ballPos + inward * ((need - sum) / math.sqrt(2))
+	local vn = ballVel:Dot(inward)
+	if vn < 0 then
+		local impactSpeed = ballVel.Magnitude
+		ballVel = (ballVel - inward * (2 * vn)) * 0.62
+		if impactSpeed > 90 then
+			playSfx(SFX.Bounce, 0.03, 1.1)
+		end
+	end
+end
+
 local function ballStep(dt)
 	-- Два подшага — быстрый мяч не пролетает сквозь фишки и штанги
 	for _ = 1, 2 do
 		local sdt = dt / 2
 		collideBallWithChip(playerPos, playerVel)
 		collideBallWithChip(botPos, botVel)
+
+		-- Углы поля скошены и чуть наклонены внутрь: почти остановившийся мяч
+		-- сам выкатывается из мёртвого угла, а не остаётся там навсегда.
+		if isInCornerZone(ballPos, 115) and ballVel.Magnitude < 110 then
+			local inward = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - ballPos)
+			ballVel = ballVel + inward * (230 * sdt)
+		end
 
 		ballPos = ballPos + ballVel * sdt
 		ballVel = ballVel * math.pow(0.34, sdt) -- сильное трение: мяч тяжёлый и быстро останавливается
@@ -1947,6 +2484,12 @@ local function ballStep(dt)
 			ballPos = Vector2.new(ballPos.X, FIELD_H - BALL_R)
 			ballVel = Vector2.new(ballVel.X, -math.abs(ballVel.Y) * 0.62)
 		end
+
+		-- Скошенные углы-отбойники выталкивают мяч обратно в игру
+		collideBallCorner(1, 1)
+		collideBallCorner(-1, 1)
+		collideBallCorner(1, -1)
+		collideBallCorner(-1, -1)
 
 		-- Левые ворота (игрока) / левая стенка
 		if ballPos.X < BALL_R then
@@ -2075,10 +2618,75 @@ local function updateFieldCamera(dt)
 	fieldFrame.Size = UDim2.fromOffset(fieldWpx, fieldHpx)
 end
 
+local function applyDirectionMarkers()
+	if playerDirMarker then
+		playerDirMarker.Position = UDim2.fromScale(
+			0.5 + math.cos(playerFacingAngle) * 0.39,
+			0.5 + math.sin(playerFacingAngle) * 0.39
+		)
+		playerDirMarker.Rotation = math.deg(playerFacingAngle) + 45
+	end
+	if botDirMarker then
+		botDirMarker.Position = UDim2.fromScale(
+			0.5 + math.cos(botFacingAngle) * 0.39,
+			0.5 + math.sin(botFacingAngle) * 0.39
+		)
+		botDirMarker.Rotation = math.deg(botFacingAngle) + 45
+	end
+end
+
+local function updateDirectionMarkers(dt)
+	if playerVel.Magnitude > 18 then
+		playerFacingAngle = lerpAngle(playerFacingAngle, math.atan(playerVel.Y, playerVel.X), dt * 14)
+	end
+	if botVel.Magnitude > 18 then
+		botFacingAngle = lerpAngle(botFacingAngle, math.atan(botVel.Y, botVel.X), dt * 14)
+	end
+	applyDirectionMarkers()
+end
+
+local function replayStep(dt)
+	if not replayActive then
+		return
+	end
+	replayTime = replayTime + dt
+	local sourceDuration = replaySourceEnd - replaySourceStart
+	local sourceT = replaySourceStart + math.min(sourceDuration, replayTime * (sourceDuration / replayDuration))
+	while replayFrameIndex < #replayFrames and replayFrames[replayFrameIndex + 1].t <= sourceT do
+		replayFrameIndex = replayFrameIndex + 1
+	end
+	local a = replayFrames[replayFrameIndex]
+	local b = replayFrames[math.min(replayFrameIndex + 1, #replayFrames)]
+	local alpha = 0
+	if b.t > a.t then
+		alpha = clamp((sourceT - a.t) / (b.t - a.t), 0, 1)
+	end
+	playerPos = a.p:Lerp(b.p, alpha)
+	botPos = a.b:Lerp(b.b, alpha)
+	ballPos = a.ball:Lerp(b.ball, alpha)
+	ballRotation = a.rot + (b.rot - a.rot) * alpha
+	playerFacingAngle = lerpAngle(a.pf, b.pf, alpha)
+	botFacingAngle = lerpAngle(a.bf, b.bf, alpha)
+	applyDirectionMarkers()
+
+	local left = math.max(0, replayDuration - replayTime)
+	replayTitle.Text = string.format("%s  •  %.1f c",
+		(lastScorer == "player") and "📺 ПОВТОР ТВОЕГО ГОЛА" or "📺 ПОВТОР ГОЛА БОТА", left)
+	replayProgressFill.Size = UDim2.fromScale(clamp(replayTime / replayDuration, 0, 1), 1)
+
+	if replayTime >= replayDuration then
+		endGoalReplay()
+	end
+end
+
 local function render()
 	playerChip.Position = fieldPosToUI(playerPos)
 	botChip.Position = fieldPosToUI(botPos)
 	ballFrame.Position = fieldPosToUI(ballPos)
+	if ballBody then
+		ballBody.Rotation = ballRotation % 360
+	end
+	applyDirectionMarkers()
 end
 
 local function chargeStep(dt)
@@ -2093,24 +2701,17 @@ local function chargeStep(dt)
 		powerBarFill.BackgroundColor3 = COL.Yellow:Lerp(Color3.fromRGB(255, 59, 48), (chargePower - 0.5) * 2)
 	end
 
-	-- Прицел показывает НАСТОЯЩЕЕ физическое направление удара:
-	-- от фишки через центр мяча, а курсор лишь аккуратно доворачивает угол.
+	-- Стрелка показывает ТОЧНУЮ линию центр фишки -> центр мяча.
 	local from
-	local aim
 	local dir
 	local inKickRange = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH
-	if chargeAimToGoal then
-		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
-		aim = Vector2.new(FIELD_W, cornerY)
-	else
-		aim = screenToField(mouseGuiPos())
-	end
 	if inKickRange then
 		from = ballPos
-		dir = getKickDirection(false, aim) * 100
+		dir = getContactDirection(false) * 100
 	else
+		local aim = chargeAimToGoal and Vector2.new(FIELD_W, GOAL_CENTER_Y) or screenToField(mouseGuiPos())
 		from = playerPos
-		dir = aim - from -- мяч далеко: стрелка показывает направление рывка
+		dir = aim - from -- мяч не касается фишки: стрелка показывает только рывок
 	end
 	if dir.Magnitude > 1 then
 		aimLine.Position = fieldPosToUI(from)
@@ -2131,12 +2732,18 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 				togglePause(false)
 			end
 		end
-		if input.KeyCode == Enum.KeyCode.Space and state == "Playing" and not gameProcessed then
-			-- Быстрый удар по воротам с пробела (бонус)
-			isCharging = true
-			chargeAimToGoal = true
-			chargePower = 0.55
-			releaseKick()
+		if input.KeyCode == Enum.KeyCode.Space and not gameProcessed then
+			if state == "Replay" then
+				endGoalReplay()
+			elseif state == "Goal" then
+				replaySkipRequested = true
+			elseif state == "Playing" then
+				-- Быстрый физический удар с пробела (бонус во время игры)
+				isCharging = true
+				chargeAimToGoal = true
+				chargePower = 0.55
+				releaseKick()
+			end
 		end
 	end
 
@@ -2220,6 +2827,13 @@ cameraGameButton.MouseButton1Click:Connect(function()
 	refreshCameraButtons()
 	updateFieldCamera(1)
 end)
+replaySkipButton.MouseButton1Click:Connect(function()
+	if state == "Replay" then
+		endGoalReplay()
+	elseif state == "Goal" then
+		replaySkipRequested = true
+	end
+end)
 quitToMenuButton.MouseButton1Click:Connect(function()
 	goToMenu()
 end)
@@ -2266,21 +2880,26 @@ RunService.RenderStepped:Connect(function(dt)
 
 	if state == "Playing" then
 		playingStep(dt)
+		updateDirectionMarkers(dt)
+		recordReplayFrame(dt)
 		chargeStep(dt)
 	elseif state == "Goal" then
 		ballSettleStep(dt)
+		recordReplayFrame(dt)
+	elseif state == "Replay" then
+		replayStep(dt)
 	elseif state == "Countdown" then
 		-- Стоим на местах, ждём свистка
 	end
 
 	updateFieldCamera(dt)
 
-	-- Мяч катится — крутим его рисунок
+	-- Мяч катится — крутим его тело (угол пишется в повтор без скачков 360->0)
 	if state == "Playing" or state == "Goal" then
-		ballFrame.Rotation = (ballFrame.Rotation + ballVel.X * dt * 0.35) % 360
+		ballRotation = ballRotation + ballVel.X * dt * 0.35
 	end
 
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.2 загружена ✅ Лобби на экране. Жми «ИГРАТЬ 1 на 1»!")
+print("[ROBALL] Часть 1 v1.3 загружена ✅ Лобби на экране. Жми «ИГРАТЬ 1 на 1»!")
