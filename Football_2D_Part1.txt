@@ -1,0 +1,1930 @@
+--[[
+================================================================================
+  ⚽ RFC FOOTBALL 2D — ЧАСТЬ 1 (МЕНЮ + Матч 1 на 1 С БОТОМ)
+  Авторская сборка для Roblox Studio • Актуально на 2026 год
+================================================================================
+
+  ЧТО ВНУТРИ:
+  • Большое футбольное меню на весь экран
+  • Кнопка «ИГРАТЬ 1 на 1» + выбор сложности бота (Лёгкий / Средний / Сложный)
+  • Полностью 2D-игра (НЕ на 3D-карте, всё рисуется интерфейсом)
+  • Игрок и бот — круглые фишки, мяч в центре поля
+  • Удар на ЛКМ: держишь — заряжается сила, отпускаешь — мяч летит в сторону курсора
+  • Умный ИИ бота: атакует, защищается, выбивает мяч, бьёт по углам ворот
+  • Матч до 3 голов, время матча — 2 минуты (ничья по времени = золотой гол)
+  • Небольшое уютное поле, табло, таймер, пауза, экран конца матча, реванш
+  • Поддержка телефона: веди фишку пальцем по полю + кнопка «УДАР»
+
+--------------------------------------------------------------------------------
+  📥 КУДА ВСТАВЛЯТЬ (ОЧЕНЬ ПРОСТО, ВСЁ В ОДНО МЕСТО):
+--------------------------------------------------------------------------------
+  1) Открой свой проект в Roblox Studio (подойдёт пустая Baseplate).
+  2) Справа в Explorer найди папку  StarterGui
+  3) Наведи на неё мышь, нажми  [+]  → выбери  LocalScript
+  4) Откроется скрипт. УДАЛИ там всё (строку print("Hello world!")).
+  5) Вставь ВЕСЬ этот файл целиком (Ctrl+A → сюда Ctrl+V).
+  6) Нажми Play (▶) сверху. Готово!
+
+  ⚠️ Больше НИЧЕГО создавать не надо: ни карту, ни детали, ни другие скрипты.
+     Скрипт сам строит меню, поле, фишки и мяч. Один LocalScript — вся игра.
+
+--------------------------------------------------------------------------------
+  🎮 УПРАВЛЕНИЕ:
+--------------------------------------------------------------------------------
+  WASD / Стрелки ......... движение фишки
+  ЛКМ (держать) .......... зарядка удара (появится прицел и полоса силы)
+  ЛКМ (отпустить) ........ удар: мяч летит в сторону курсора мыши
+  ЛКМ вдалеке от мяча .... короткий рывок в сторону курсора
+  Shift .................. спринт
+  P или кнопка ⏸ ......... пауза
+  Телефон ................ веди пальцем по полю + кнопка «УДАР»
+
+  Твои ворота — СЛЕВА (защищай), ворота бота — СПРАВА (атакуй).
+  Кто первым забьёт 3 гола — победитель. Матч длится 2:00.
+  Если время вышло при равном счёте — «ЗОЛОТОЙ ГОЛ»: следующий гол решает всё.
+================================================================================
+]]
+
+--// Сервисы \\--
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local TweenService      = game:GetService("TweenService")
+local SoundService      = game:GetService("SoundService")
+local Debris            = game:GetService("Debris")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local rng       = Random.new()
+
+-- Удаляем старую копию GUI, если скрипт перезапустился (респавн / повторный Play)
+local oldGui = playerGui:FindFirstChild("RFC_Football2D_GUI")
+if oldGui then
+	oldGui:Destroy()
+end
+
+--// Настройки игры (можешь крутить под себя) \\--
+local SETTINGS = {
+	WIN_GOALS    = 3,      -- матч до скольки голов
+	MATCH_TIME   = 120,    -- время матча в секундах (2 минуты)
+	PLAYER_SPEED = 345,    -- скорость фишки игрока
+	PLAYER_SPRINT = 460,   -- скорость на Shift
+}
+
+--// Виртуальное поле (координаты игры, НЕ пиксели экрана) \\--
+local FIELD_W, FIELD_H = 1000, 600
+local GOAL_Y1, GOAL_Y2 = 210, 390        -- проём ворот по вертикали
+local GOAL_CENTER_Y    = 300
+local PLAYER_R = 27                      -- радиус фишек
+local BALL_R   = 13                      -- радиус мяча
+local POSTS = {                          -- штанги
+	Vector2.new(0, GOAL_Y1), Vector2.new(0, GOAL_Y2),
+	Vector2.new(FIELD_W, GOAL_Y1), Vector2.new(FIELD_W, GOAL_Y2),
+}
+
+--// Сложности бота \\--
+local DIFFICULTIES = {
+	Easy = {
+		Title = "😊 ЛЁГКИЙ", Color = Color3.fromRGB(76, 217, 100),
+		Speed = 228, Reaction = 0.50, KickPower = 480, KickCooldown = 1.50,
+		AimError = 26, Predict = 0.00, Aggression = 0.30, ShootX = 300,
+		Description = "Бот медленный и часто ошибается. Для разминки.",
+	},
+	Medium = {
+		Title = "⚔️ СРЕДНИЙ", Color = Color3.fromRGB(255, 204, 0),
+		Speed = 298, Reaction = 0.28, KickPower = 650, KickCooldown = 1.00,
+		AimError = 14, Predict = 0.35, Aggression = 0.60, ShootX = 400,
+		Description = "Бот борется, защищается и бьёт по углам.",
+	},
+	Hard = {
+		Title = "🔥 СЛОЖНЫЙ", Color = Color3.fromRGB(255, 59, 48),
+		Speed = 368, Reaction = 0.12, KickPower = 830, KickCooldown = 0.65,
+		AimError = 6, Predict = 0.70, Aggression = 0.85, ShootX = 485,
+		Description = "Предвидит мяч, быстрый и точный. Удачи.",
+	},
+}
+local DIFF_ORDER = { "Easy", "Medium", "Hard" }
+
+--// Цвета \\--
+local COL = {
+	White    = Color3.fromRGB(255, 255, 255),
+	Black    = Color3.fromRGB(14, 16, 20),
+	Player   = Color3.fromRGB(0, 122, 255),
+	Bot      = Color3.fromRGB(255, 59, 48),
+	GreenBtn = Color3.fromRGB(46, 204, 113),
+	FieldA   = Color3.fromRGB(38, 150, 66),
+	FieldB   = Color3.fromRGB(28, 120, 52),
+	DarkBg   = Color3.fromRGB(10, 22, 16),
+	Panel    = Color3.fromRGB(16, 28, 40),
+	GreyBtn  = Color3.fromRGB(44, 58, 74),
+	Yellow   = Color3.fromRGB(255, 214, 10),
+}
+
+--// Состояние матча \\--
+local state = "Menu"            -- Menu / Countdown / Playing / Goal / Paused / Finished
+local selectedDiffKey = "Medium"
+local currentDiff = DIFFICULTIES.Medium
+
+local playerPos = Vector2.new(200, 300)
+local playerVel = Vector2.new(0, 0)
+local botPos    = Vector2.new(800, 300)
+local botVel    = Vector2.new(0, 0)
+local ballPos   = Vector2.new(500, 300)
+local ballVel   = Vector2.new(0, 0)
+
+local playerScore, botScore = 0, 0
+local timeLeft = SETTINGS.MATCH_TIME
+local overtime = false
+local shotsPlayer, shotsBot = 0, 0
+
+local isCharging = false
+local chargePower = 0
+local chargeAimToGoal = false   -- true при ударе с кнопки «УДАР» (телефон)
+local dashTime, dashCooldown = 0, 0
+local dashDir = Vector2.new(1, 0)
+
+local botTargetPos = Vector2.new(800, 300)
+local botThinkTimer, botKickCooldown = 0, 0.5
+local ballIdleTimer = 0
+
+local keysDown = {}
+local touchActive = false
+local touchFieldPos = Vector2.new(200, 300)
+local matchToken = 0            -- защита от старых таймеров при рестарте / выходе в меню
+local toastToken = 0
+
+--// Объявления вперёд (функции и UI-элементы заполнятся ниже) \\--
+local startMatch, goToMenu, finishMatch, resetKickoff, startCountdown, onGoal, updateHUD, showToast
+local screenGui, menuFrame, gameFrame, fieldFrame
+local playerChip, botChip, ballFrame, aimLine
+local scoreLeftLabel, scoreRightLabel, timerLabel, diffBadgeLabel
+local powerBarBg, powerBarFill, countdownLabel, goalBanner, toastLabel
+local pauseOverlay, finishOverlay, finishTitle, finishScore, finishStats, menuBall
+local diffDescLabel
+local diffButtons = {}
+
+--// Маленькие помощники \\--
+local function clamp(v, a, b)
+	if v < a then return a end
+	if v > b then return b end
+	return v
+end
+
+local function unit2(v)
+	local m = v.Magnitude
+	if m < 0.0001 then
+		return Vector2.new(0, 0)
+	end
+	return v / m
+end
+
+local function rotate2(v, radians)
+	local c = math.cos(radians)
+	local s = math.sin(radians)
+	return Vector2.new(v.X * c - v.Y * s, v.X * s + v.Y * c)
+end
+
+local function create(className, props, parent)
+	local inst = Instance.new(className)
+	for k, v in pairs(props) do
+		inst[k] = v
+	end
+	if parent then
+		inst.Parent = parent
+	end
+	return inst
+end
+
+local function addCorner(obj, scale, offset)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(scale or 0, offset or 0)
+	c.Parent = obj
+	return c
+end
+
+local function addStroke(obj, color, thickness, transparency)
+	local s = Instance.new("UIStroke")
+	s.Color = color
+	s.Thickness = thickness or 2
+	s.Transparency = transparency or 0
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = obj
+	return s
+end
+
+local function addGradient(obj, c1, c2, rotation)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(c1, c2)
+	g.Rotation = rotation or 90
+	g.Parent = obj
+	return g
+end
+
+local function makeText(parent, props)
+	local base = {
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = COL.White,
+		Font = Enum.Font.GothamBold,
+		TextSize = 18,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextYAlignment = Enum.TextYAlignment.Center,
+	}
+	for k, v in pairs(props) do
+		base[k] = v
+	end
+	return create("TextLabel", base, parent)
+end
+
+-- Безопасные звуки: если какого-то файла в игре нет — просто тишина, игра не ломается
+local function playSfx(assetId, volume, pitch)
+	local ok = pcall(function()
+		local s = Instance.new("Sound")
+		s.SoundId = assetId
+		s.Volume = volume or 0.5
+		s.PlaybackSpeed = pitch or 1
+		s.Parent = SoundService
+		s:Play()
+		Debris:AddItem(s, 2)
+	end)
+	return ok
+end
+local SFX = {
+	Click  = "rbxasset://sounds/clickfast.wav",
+	Kick   = "rbxasset://sounds/collide.wav",
+	Bounce = "rbxasset://sounds/collide.wav",
+}
+
+local function makeButton(parent, props)
+	local base = {
+		BackgroundColor3 = COL.GreenBtn,
+		Text = "",
+		TextColor3 = COL.White,
+		Font = Enum.Font.GothamBold,
+		TextSize = 20,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+	}
+	for k, v in pairs(props) do
+		base[k] = v
+	end
+	local btn = create("TextButton", base, parent)
+	local scale = Instance.new("UIScale")
+	scale.Parent = btn
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(scale, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1.05 }):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(scale, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	end)
+	btn.MouseButton1Click:Connect(function()
+		playSfx(SFX.Click, 0.4, 1)
+	end)
+	return btn
+end
+
+-- Конвертеры координат: виртуальное поле 1000x600 <-> экран
+-- ВНИМАНИЕ: GetMouseLocation() и InputObject.Position считают   от   верхнего   угла   окна (с топбаром),
+-- а AbsolutePosition у GUI — уже БЕЗ него. Вычитаем GuiInset, иначе прицел съедет на ~36 пикселей по Y.
+local function toGuiSpace(rawPos)
+	local topLeftInset = GuiService:GetGuiInset()
+	return rawPos - topLeftInset
+end
+
+local function mouseGuiPos()
+	return toGuiSpace(UserInputService:GetMouseLocation())
+end
+
+local function fieldPosToUI(pos)
+	return UDim2.fromScale(pos.X / FIELD_W, pos.Y / FIELD_H)
+end
+
+local function fieldSizeToUI(w, h)
+	return UDim2.fromScale(w / FIELD_W, h / FIELD_H)
+end
+
+local function screenToField(screenPos)
+	local ap = fieldFrame.AbsolutePosition
+	local as = fieldFrame.AbsoluteSize
+	if as.X < 1 or as.Y < 1 then
+		return ballPos
+	end
+	local rel = screenPos - ap
+	return Vector2.new(rel.X / as.X * FIELD_W, rel.Y / as.Y * FIELD_H)
+end
+
+local function isScreenPosInsideField(screenPos)
+	local ap = fieldFrame.AbsolutePosition
+	local as = fieldFrame.AbsoluteSize
+	return screenPos.X >= ap.X and screenPos.X <= ap.X + as.X
+		and screenPos.Y >= ap.Y and screenPos.Y <= ap.Y + as.Y
+end
+
+--================================================================================
+--  ВЫКЛЮЧАЕМ 3D-ПЕРСОНАЖА: игра полностью экранная, WASD не должны двигать человечка
+--================================================================================
+task.spawn(function()
+	local ok, playerModule = pcall(function()
+		return require(player:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule"))
+	end)
+	if ok and playerModule then
+		playerModule:GetControls():Disable()
+	end
+end)
+
+local function freezeCharacter(character)
+	task.spawn(function()
+		local hrp = character:WaitForChild("HumanoidRootPart", 10)
+		if hrp then
+			hrp.Anchored = true
+		end
+	end)
+end
+if player.Character then
+	freezeCharacter(player.Character)
+end
+player.CharacterAdded:Connect(freezeCharacter)
+
+local camera = workspace.CurrentCamera
+if camera then
+	camera.CameraType = Enum.CameraType.Scriptable
+end
+
+--================================================================================
+--  СТРОИМ ИНТЕРФЕЙС
+--================================================================================
+screenGui = create("ScreenGui", {
+	Name = "RFC_Football2D_GUI",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	DisplayOrder = 10,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+--------------------------------------------------------------------------------
+--  ГЛАВНОЕ МЕНЮ (на весь экран)
+--------------------------------------------------------------------------------
+menuFrame = create("Frame", {
+	Name = "Menu",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = COL.DarkBg,
+	BorderSizePixel = 0,
+	ZIndex = 1,
+}, screenGui)
+addGradient(menuFrame, Color3.fromRGB(8, 32, 22), Color3.fromRGB(5, 12, 26), 90)
+
+-- «Газон» внизу меню: полосы поля
+local menuGround = create("Frame", {
+	Name = "Ground",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.fromScale(0.5, 1),
+	Size = UDim2.fromScale(1, 0.30),
+	BackgroundColor3 = COL.FieldA,
+	BorderSizePixel = 0,
+	ZIndex = 1,
+}, menuFrame)
+addGradient(menuGround, COL.FieldA, COL.FieldB, 90)
+for i = 0, 9 do
+	create("Frame", {
+		Position = UDim2.fromScale(i / 10, 0),
+		Size = UDim2.fromScale(1 / 10, 1),
+		BackgroundColor3 = COL.White,
+		BackgroundTransparency = (i % 2 == 0) and 0.94 or 1,
+		BorderSizePixel = 0,
+		ZIndex = 1,
+	}, menuGround)
+end
+-- Белая линия газона и центральный круг для красоты
+create("Frame", {
+	Position = UDim2.fromScale(0, 0),
+	Size = UDim2.new(1, 0, 0, 4),
+	BackgroundColor3 = COL.White,
+	BackgroundTransparency = 0.25,
+	BorderSizePixel = 0,
+	ZIndex = 2,
+}, menuGround)
+local menuCircle = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0),
+	Size = UDim2.new(0, 260, 0, 130),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 2,
+}, menuGround)
+addCorner(menuCircle, 1, 0)
+addStroke(menuCircle, COL.White, 3, 0.4)
+
+-- Большой вращающийся мяч (рисуем кружками — картинки не нужны)
+menuBall = create("Frame", {
+	Name = "BigBall",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.845, 0.26),
+	Size = UDim2.fromScale(0.17, 0.17),
+	BackgroundColor3 = COL.White,
+	BorderSizePixel = 0,
+	ZIndex = 2,
+}, menuFrame)
+addCorner(menuBall, 1, 0)
+addStroke(menuBall, COL.Black, 4, 0)
+local menuBallRatio = Instance.new("UIAspectRatioConstraint")
+menuBallRatio.AspectRatio = 1
+menuBallRatio.Parent = menuBall
+local ballDotPositions = { {0.5, 0.5, 0.30}, {0.22, 0.28, 0.18}, {0.78, 0.30, 0.18}, {0.30, 0.75, 0.18}, {0.72, 0.74, 0.18} }
+for _, d in ipairs(ballDotPositions) do
+	local dot = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(d[1], d[2]),
+		Size = UDim2.fromScale(d[3], d[3]),
+		BackgroundColor3 = COL.Black,
+		BorderSizePixel = 0,
+		ZIndex = 3,
+	}, menuBall)
+	addCorner(dot, 1, 0)
+end
+
+-- Заголовок
+local titleLabel = makeText(menuFrame, {
+	Name = "Title",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.035),
+	Size = UDim2.fromScale(0.94, 0.16),
+	Text = "⚽ RFC FOOTBALL 2D",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 64,
+	TextScaled = true,
+	TextColor3 = COL.White,
+	TextStrokeColor3 = Color3.fromRGB(0, 60, 30),
+	TextStrokeTransparency = 0.35,
+	ZIndex = 5,
+})
+create("UITextSizeConstraint", { MaxTextSize = 72 }, titleLabel)
+
+makeText(menuFrame, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.185),
+	Size = UDim2.fromScale(0.9, 0.05),
+	Text = "МАТЧ 1 на 1 ПРОТИВ КОМПЬЮТЕРА  •  ДО 3 ГОЛОВ  •  2 МИНУТЫ",
+	Font = Enum.Font.GothamBold,
+	TextSize = 20,
+	TextScaled = true,
+	TextColor3 = COL.Yellow,
+	ZIndex = 5,
+})
+
+-- Центральная панель
+local menuPanel = create("Frame", {
+	Name = "Panel",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.47),
+	Size = UDim2.fromScale(0.46, 0.42),
+	BackgroundColor3 = COL.Panel,
+	BackgroundTransparency = 0.12,
+	BorderSizePixel = 0,
+	ZIndex = 5,
+}, menuFrame)
+addCorner(menuPanel, 0, 18)
+addStroke(menuPanel, COL.White, 2, 0.75)
+
+-- БОЛЬШАЯ кнопка «ИГРАТЬ»
+local playButton = makeButton(menuPanel, {
+	Name = "PlayButton",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.07),
+	Size = UDim2.fromScale(0.84, 0.24),
+	BackgroundColor3 = COL.GreenBtn,
+	Text = "▶  ИГРАТЬ 1 на 1",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 34,
+	TextScaled = true,
+	ZIndex = 6,
+})
+addCorner(playButton, 0, 16)
+addStroke(playButton, COL.White, 2, 0.4)
+
+makeText(menuPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.37),
+	Size = UDim2.fromScale(0.9, 0.09),
+	Text = "СЛОЖНОСТЬ БОТА:",
+	TextSize = 18,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(190, 205, 220),
+	ZIndex = 6,
+})
+
+-- Кнопки сложности
+for i, key in ipairs(DIFF_ORDER) do
+	local d = DIFFICULTIES[key]
+	local btn = makeButton(menuPanel, {
+		Name = "Diff_" .. key,
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.fromScale(0.19 + (i - 1) * 0.31, 0.48),
+		Size = UDim2.fromScale(0.28, 0.17),
+		BackgroundColor3 = COL.GreyBtn,
+		Text = d.Title,
+		TextSize = 17,
+		TextScaled = true,
+		ZIndex = 6,
+	})
+	addCorner(btn, 0, 12)
+	local stroke = addStroke(btn, COL.White, 3, 1)
+	diffButtons[key] = { Button = btn, Stroke = stroke }
+end
+
+diffDescLabel = makeText(menuPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.69),
+	Size = UDim2.fromScale(0.9, 0.12),
+	Text = "",
+	TextSize = 16,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(200, 212, 226),
+	TextWrapped = true,
+	ZIndex = 6,
+})
+
+makeText(menuPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.84),
+	Size = UDim2.fromScale(0.92, 0.13),
+	Text = "Твоя фишка — СИНЯЯ слева. Атакуй КРАСНЫЕ ворота справа!",
+	TextSize = 16,
+	TextScaled = true,
+	TextColor3 = COL.Yellow,
+	TextWrapped = true,
+	ZIndex = 6,
+})
+
+local function refreshDifficultyButtons()
+	for key, info in pairs(diffButtons) do
+		local d = DIFFICULTIES[key]
+		if key == selectedDiffKey then
+			info.Button.BackgroundColor3 = d.Color
+			info.Stroke.Transparency = 0
+		else
+			info.Button.BackgroundColor3 = COL.GreyBtn
+			info.Stroke.Transparency = 1
+		end
+	end
+	diffDescLabel.Text = DIFFICULTIES[selectedDiffKey].Description
+end
+
+for key, info in pairs(diffButtons) do
+	info.Button.MouseButton1Click:Connect(function()
+		selectedDiffKey = key
+		refreshDifficultyButtons()
+	end)
+end
+refreshDifficultyButtons()
+
+playButton.MouseButton1Click:Connect(function()
+	if startMatch then
+		startMatch()
+	end
+end)
+
+-- Подсказку управления снизу меню
+local controlsText = "🎮 WASD — движение  •  ЛКМ держать/отпустить — удар по курсору  •  Shift — спринт  •  P — пауза"
+if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+	controlsText = "📱 Веди фишку пальцем по полю  •  Кнопка «УДАР» — удар по воротам (держи для силы)"
+end
+makeText(menuFrame, {
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.fromScale(0.5, 0.985),
+	Size = UDim2.fromScale(0.96, 0.055),
+	Text = controlsText,
+	TextSize = 17,
+	TextScaled = true,
+	TextColor3 = COL.White,
+	TextWrapped = true,
+	ZIndex = 5,
+})
+
+makeText(menuFrame, {
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.fromScale(0.99, 0.012),
+	Size = UDim2.fromScale(0.2, 0.035),
+	Text = "ЧАСТЬ 1",
+	TextSize = 14,
+	TextColor3 = Color3.fromRGB(160, 175, 190),
+	TextXAlignment = Enum.TextXAlignment.Right,
+	ZIndex = 5,
+})
+
+--------------------------------------------------------------------------------
+--  ЭКРАН ИГРЫ
+--------------------------------------------------------------------------------
+gameFrame = create("Frame", {
+	Name = "Game",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.fromRGB(7, 16, 24),
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 1,
+}, screenGui)
+addGradient(gameFrame, Color3.fromRGB(9, 24, 18), Color3.fromRGB(5, 10, 20), 90)
+
+-- Табло сверху
+local scoreBoard = create("Frame", {
+	Name = "ScoreBoard",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.015),
+	Size = UDim2.fromScale(0.48, 0.075),
+	BackgroundColor3 = Color3.fromRGB(10, 14, 22),
+	BackgroundTransparency = 0.15,
+	BorderSizePixel = 0,
+	ZIndex = 20,
+}, gameFrame)
+addCorner(scoreBoard, 0, 14)
+addStroke(scoreBoard, COL.White, 2, 0.7)
+
+scoreLeftLabel = makeText(scoreBoard, {
+	AnchorPoint = Vector2.new(0, 0.5),
+	Position = UDim2.fromScale(0.03, 0.5),
+	Size = UDim2.fromScale(0.34, 0.9),
+	Text = "ВЫ  0",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 28,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(90, 180, 255),
+	ZIndex = 21,
+})
+timerLabel = makeText(scoreBoard, {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(0.30, 0.9),
+	Text = "2:00",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 30,
+	TextScaled = true,
+	TextColor3 = COL.White,
+	ZIndex = 21,
+})
+scoreRightLabel = makeText(scoreBoard, {
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.fromScale(0.97, 0.5),
+	Size = UDim2.fromScale(0.34, 0.9),
+	Text = "0  БОТ",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 28,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(255, 110, 100),
+	ZIndex = 21,
+})
+
+diffBadgeLabel = makeText(gameFrame, {
+	AnchorPoint = Vector2.new(0, 0),
+	Position = UDim2.fromScale(0.012, 0.02),
+	Size = UDim2.fromScale(0.20, 0.045),
+	Text = "БОТ: СРЕДНИЙ",
+	TextSize = 16,
+	TextScaled = true,
+	TextColor3 = COL.Yellow,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 20,
+})
+
+toastLabel = makeText(gameFrame, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.10),
+	Size = UDim2.fromScale(0.7, 0.05),
+	Text = "",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 24,
+	TextScaled = true,
+	TextColor3 = COL.Yellow,
+	TextStrokeColor3 = COL.Black,
+	TextStrokeTransparency = 0.4,
+	Visible = false,
+	ZIndex = 30,
+})
+
+local pauseButton = makeButton(gameFrame, {
+	Name = "PauseButton",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.fromScale(0.988, 0.015),
+	Size = UDim2.fromScale(0.045, 0.06),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "⏸",
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 25,
+})
+addCorner(pauseButton, 0, 10)
+
+local quitToMenuButton = makeButton(gameFrame, {
+	Name = "QuitButton",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.fromScale(0.94, 0.015),
+	Size = UDim2.fromScale(0.045, 0.06),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "✕",
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 25,
+})
+addCorner(quitToMenuButton, 0, 10)
+
+-- Само поле (небольшое, аккуратное, по центру)
+fieldFrame = create("Frame", {
+	Name = "Field",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.535),
+	Size = UDim2.fromScale(0.90, 0.76),
+	BackgroundColor3 = COL.FieldA,
+	BorderSizePixel = 0,
+	ClipsDescendants = false,
+	ZIndex = 2,
+}, gameFrame)
+addGradient(fieldFrame, Color3.fromRGB(44, 165, 74), Color3.fromRGB(30, 128, 56), 0)
+addStroke(fieldFrame, COL.White, 3, 0.1)
+local fieldRatio = Instance.new("UIAspectRatioConstraint")
+fieldRatio.AspectRatio = FIELD_W / FIELD_H
+fieldRatio.Parent = fieldFrame
+
+-- Полосы газона
+for i = 0, 9 do
+	create("Frame", {
+		Position = UDim2.fromScale(i / 10, 0),
+		Size = UDim2.fromScale(1 / 10, 1),
+		BackgroundColor3 = COL.Black,
+		BackgroundTransparency = (i % 2 == 0) and 0.94 or 1,
+		BorderSizePixel = 0,
+		ZIndex = 2,
+	}, fieldFrame)
+end
+
+-- Разметка: средняя линия, круг, штрафные
+create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0),
+	Size = UDim2.new(0, 3, 1, 0),
+	BackgroundColor3 = COL.White,
+	BackgroundTransparency = 0.35,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, fieldFrame)
+local centerCircle = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = fieldSizeToUI(190, 190),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, fieldFrame)
+addCorner(centerCircle, 1, 0)
+addStroke(centerCircle, COL.White, 2, 0.45)
+local centerDot = create("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = fieldSizeToUI(10, 10),
+	BackgroundColor3 = COL.White,
+	BackgroundTransparency = 0.35,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, fieldFrame)
+addCorner(centerDot, 1, 0)
+
+local function penaltyBox(isLeft)
+	local box = create("Frame", {
+		AnchorPoint = Vector2.new(isLeft and 0 or 1, 0.5),
+		Position = UDim2.fromScale(isLeft and 0 or 1, 0.5),
+		Size = fieldSizeToUI(150, 320),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ZIndex = 3,
+	}, fieldFrame)
+	addStroke(box, COL.White, 2, 0.45)
+	local small = create("Frame", {
+		AnchorPoint = Vector2.new(isLeft and 0 or 1, 0.5),
+		Position = UDim2.fromScale(isLeft and 0 or 1, 0.5),
+		Size = fieldSizeToUI(60, 190),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ZIndex = 3,
+	}, fieldFrame)
+	addStroke(small, COL.White, 2, 0.45)
+end
+penaltyBox(true)
+penaltyBox(false)
+
+-- Ворота (сетки слева и справа, торчат за поле)
+local function makeGoal(isLeft, color)
+	local goal = create("Frame", {
+		Name = isLeft and "GoalLeft" or "GoalRight",
+		AnchorPoint = Vector2.new(isLeft and 1 or 0, 0.5),
+		Position = UDim2.fromScale(isLeft and 0 or 1, 0.5),
+		Size = fieldSizeToUI(42, GOAL_Y2 - GOAL_Y1),
+		BackgroundColor3 = color,
+		BackgroundTransparency = 0.35,
+		BorderSizePixel = 0,
+		ZIndex = 4,
+	}, fieldFrame)
+	addStroke(goal, COL.White, 3, 0)
+	-- «Сетка» — пара полосок внутри
+	for i = 1, 3 do
+		create("Frame", {
+			Position = UDim2.fromScale(0, i / 4),
+			Size = UDim2.new(1, 0, 0, 1),
+			BackgroundColor3 = COL.White,
+			BackgroundTransparency = 0.4,
+			BorderSizePixel = 0,
+			ZIndex = 4,
+		}, goal)
+	end
+	return goal
+end
+makeGoal(true, COL.Player)   -- твои ворота (синяя сетка) — защищай!
+makeGoal(false, COL.Bot)     -- ворота бота (красная сетка) — атакуй!
+
+-- Штанги (белые точки по краям проёма)
+for _, p in ipairs(POSTS) do
+	local post = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = fieldPosToUI(p),
+		Size = fieldSizeToUI(14, 14),
+		BackgroundColor3 = COL.White,
+		BorderSizePixel = 0,
+		ZIndex = 7,
+	}, fieldFrame)
+	addCorner(post, 1, 0)
+	addStroke(post, COL.Black, 1, 0.3)
+end
+
+-- Линия прицела (видна, пока держишь ЛКМ)
+aimLine = create("Frame", {
+	Name = "AimLine",
+	AnchorPoint = Vector2.new(0, 0.5),
+	Position = fieldPosToUI(ballPos),
+	Size = UDim2.new(0.1, 0, 0, 5),
+	BackgroundColor3 = COL.Yellow,
+	BackgroundTransparency = 0.25,
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 6,
+}, fieldFrame)
+addCorner(aimLine, 1, 0)
+
+-- Круглые фишки
+local function makeChip(color, numberText, nameText)
+	local chip = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = fieldSizeToUI(PLAYER_R * 2, PLAYER_R * 2),
+		BackgroundColor3 = color,
+		BorderSizePixel = 0,
+		ZIndex = 8,
+	}, fieldFrame)
+	addCorner(chip, 1, 0)
+	addStroke(chip, COL.White, 3, 0)
+	-- Внутренний ободок
+	local inner = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.68, 0.68),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ZIndex = 9,
+	}, chip)
+	addCorner(inner, 1, 0)
+	addStroke(inner, COL.White, 2, 0.35)
+	-- Номер
+	makeText(chip, {
+		Size = UDim2.fromScale(1, 1),
+		Text = numberText,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 22,
+		TextScaled = true,
+		TextColor3 = COL.White,
+		ZIndex = 10,
+	})
+	-- Подпись над фишкой
+	makeText(chip, {
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 0, -3),
+		Size = UDim2.new(2.2, 0, 0, 18),
+		Text = nameText,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 14,
+		TextColor3 = COL.White,
+		TextStrokeColor3 = COL.Black,
+		TextStrokeTransparency = 0.3,
+		ZIndex = 10,
+	})
+	return chip
+end
+playerChip = makeChip(COL.Player, "10", "ВЫ")
+botChip = makeChip(COL.Bot, "9", "БОТ")
+
+-- Мяч
+ballFrame = create("Frame", {
+	Name = "Ball",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2),
+	BackgroundColor3 = COL.White,
+	BorderSizePixel = 0,
+	ZIndex = 11,
+}, fieldFrame)
+addCorner(ballFrame, 1, 0)
+addStroke(ballFrame, COL.Black, 2, 0)
+for _, d in ipairs({ {0.5, 0.5, 0.34}, {0.2, 0.25, 0.2}, {0.8, 0.3, 0.2}, {0.3, 0.8, 0.2}, {0.75, 0.78, 0.2} }) do
+	local dot = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(d[1], d[2]),
+		Size = UDim2.fromScale(d[3], d[3]),
+		BackgroundColor3 = COL.Black,
+		BorderSizePixel = 0,
+		ZIndex = 12,
+	}, ballFrame)
+	addCorner(dot, 1, 0)
+end
+
+-- Полоса силы удара
+powerBarBg = create("Frame", {
+	Name = "PowerBar",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.fromScale(0.5, 0.985),
+	Size = UDim2.fromScale(0.30, 0.024),
+	BackgroundColor3 = Color3.fromRGB(20, 26, 34),
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 25,
+}, gameFrame)
+addCorner(powerBarBg, 1, 0)
+addStroke(powerBarBg, COL.White, 1, 0.6)
+powerBarFill = create("Frame", {
+	Size = UDim2.fromScale(0, 1),
+	BackgroundColor3 = COL.GreenBtn,
+	BorderSizePixel = 0,
+	ZIndex = 26,
+}, powerBarBg)
+addCorner(powerBarFill, 1, 0)
+
+makeText(gameFrame, {
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.fromScale(0.012, 0.99),
+	Size = UDim2.fromScale(0.34, 0.04),
+	Text = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
+		and "📱 Палец по полю — движение • УДАР — по воротам"
+		or "🎮 WASD — движение • ЛКМ — удар • Shift — спринт",
+	TextSize = 14,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(170, 185, 200),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 20,
+})
+
+-- Кнопка УДАР для телефона (на ПК скрыта)
+local kickButton = makeButton(gameFrame, {
+	Name = "KickButton",
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.fromScale(0.985, 0.985),
+	Size = UDim2.fromScale(0.115, 0.13),
+	BackgroundColor3 = COL.Bot,
+	Text = "⚽\nУДАР",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 20,
+	TextScaled = true,
+	Visible = UserInputService.TouchEnabled,
+	ZIndex = 26,
+})
+addCorner(kickButton, 1, 0)
+addStroke(kickButton, COL.White, 3, 0.2)
+
+-- Обратный отсчёт 3-2-1
+countdownLabel = makeText(gameFrame, {
+	Name = "Countdown",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(0.5, 0.3),
+	Text = "3",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 120,
+	TextScaled = true,
+	TextColor3 = COL.White,
+	TextStrokeColor3 = COL.Black,
+	TextStrokeTransparency = 0.25,
+	Visible = false,
+	ZIndex = 40,
+})
+local countdownScale = Instance.new("UIScale")
+countdownScale.Parent = countdownLabel
+
+-- Баннер «ГООООЛ!»
+goalBanner = makeText(gameFrame, {
+	Name = "GoalBanner",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.42),
+	Size = UDim2.fromScale(0.9, 0.25),
+	Text = "⚽ ГООООЛ!",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 90,
+	TextScaled = true,
+	TextColor3 = COL.Yellow,
+	TextStrokeColor3 = COL.Black,
+	TextStrokeTransparency = 0.2,
+	Visible = false,
+	ZIndex = 41,
+})
+local goalBannerScale = Instance.new("UIScale")
+goalBannerScale.Parent = goalBanner
+
+--------------------------------------------------------------------------------
+--  Оверлей паузы
+--------------------------------------------------------------------------------
+local function makeOverlay()
+	local overlay = create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = COL.Black,
+		BackgroundTransparency = 0.45,
+		BorderSizePixel = 0,
+		Visible = false,
+		ZIndex = 50,
+	}, gameFrame)
+	local panel = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.40, 0.46),
+		BackgroundColor3 = COL.Panel,
+		BorderSizePixel = 0,
+		ZIndex = 51,
+	}, overlay)
+	addCorner(panel, 0, 18)
+	addStroke(panel, COL.White, 2, 0.7)
+	return overlay, panel
+end
+
+local pausePanel
+pauseOverlay, pausePanel = makeOverlay()
+makeText(pausePanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.06),
+	Size = UDim2.fromScale(0.9, 0.18),
+	Text = "⏸ ПАУЗА",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 36,
+	TextScaled = true,
+	ZIndex = 52,
+})
+local resumeButton = makeButton(pausePanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.30),
+	Size = UDim2.fromScale(0.78, 0.17),
+	BackgroundColor3 = COL.GreenBtn,
+	Text = "▶ ПРОДОЛЖИТЬ",
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 52,
+})
+addCorner(resumeButton, 0, 12)
+local restartButtonP = makeButton(pausePanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.52),
+	Size = UDim2.fromScale(0.78, 0.17),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "🔁 Матч ЗАНОВО",
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 52,
+})
+addCorner(restartButtonP, 0, 12)
+local menuButtonP = makeButton(pausePanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.74),
+	Size = UDim2.fromScale(0.78, 0.17),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "🏠 В МЕНЮ",
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 52,
+})
+addCorner(menuButtonP, 0, 12)
+
+--------------------------------------------------------------------------------
+--  Оверлей конца матча
+--------------------------------------------------------------------------------
+local finishPanel
+finishOverlay, finishPanel = makeOverlay()
+finishTitle = makeText(finishPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.05),
+	Size = UDim2.fromScale(0.94, 0.20),
+	Text = "🏆 ПОБЕДА!",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 40,
+	TextScaled = true,
+	TextColor3 = COL.Yellow,
+	ZIndex = 52,
+})
+finishScore = makeText(finishPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.26),
+	Size = UDim2.fromScale(0.9, 0.16),
+	Text = "3 : 1",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 44,
+	TextScaled = true,
+	ZIndex = 52,
+})
+finishStats = makeText(finishPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.44),
+	Size = UDim2.fromScale(0.92, 0.14),
+	Text = "",
+	TextSize = 16,
+	TextScaled = true,
+	TextWrapped = true,
+	TextColor3 = Color3.fromRGB(190, 205, 220),
+	ZIndex = 52,
+})
+local rematchButton = makeButton(finishPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.60),
+	Size = UDim2.fromScale(0.78, 0.16),
+	BackgroundColor3 = COL.GreenBtn,
+	Text = "🔁 ЕЩЁ Матч",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 24,
+	TextScaled = true,
+	ZIndex = 52,
+})
+addCorner(rematchButton, 0, 12)
+local menuButtonF = makeButton(finishPanel, {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.80),
+	Size = UDim2.fromScale(0.78, 0.16),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "🏠 В МЕНЮ",
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 52,
+})
+addCorner(menuButtonF, 0, 12)
+
+--================================================================================
+--  ИГРОВАЯ ЛОГИКА
+--================================================================================
+
+function showToast(text, duration)
+	toastToken = toastToken + 1
+	local my = toastToken
+	toastLabel.Text = text
+	toastLabel.Visible = true
+	task.delay(duration or 2, function()
+		if toastToken == my then
+			toastLabel.Visible = false
+		end
+	end)
+end
+
+function updateHUD()
+	scoreLeftLabel.Text = "ВЫ  " .. tostring(playerScore)
+	scoreRightLabel.Text = tostring(botScore) .. "  БОТ"
+	if overtime then
+		timerLabel.Text = "ЗОЛОТОЙ ГОЛ"
+		timerLabel.TextColor3 = COL.Yellow
+	else
+		local t = math.max(0, math.ceil(timeLeft))
+		local m = math.floor(t / 60)
+		local s = t % 60
+		timerLabel.Text = string.format("%d:%02d", m, s)
+		if timeLeft <= 10 then
+			timerLabel.TextColor3 = Color3.fromRGB(255, 80, 70)
+		else
+			timerLabel.TextColor3 = COL.White
+		end
+	end
+end
+
+local function cancelCharge()
+	isCharging = false
+	chargePower = 0
+	chargeAimToGoal = false
+	powerBarBg.Visible = false
+	aimLine.Visible = false
+end
+
+-- Расстановка перед стартовым свистком. kickoffTeam: "player" или "Bot" (кто владеет мячом с центра)
+function resetKickoff(kickoffTeam)
+	ballPos = Vector2.new(FIELD_W / 2, FIELD_H / 2)
+	ballVel = Vector2.new(0, 0)
+	playerVel = Vector2.new(0, 0)
+	botVel = Vector2.new(0, 0)
+	if kickoffTeam == "player" then
+		playerPos = Vector2.new(425, 300)
+		botPos = Vector2.new(790, 300)
+	else
+		playerPos = Vector2.new(210, 300)
+		botPos = Vector2.new(575, 300)
+	end
+	botTargetPos = botPos
+	botThinkTimer = 0
+	botKickCooldown = 0.6
+	ballIdleTimer = 0
+	dashTime, dashCooldown = 0, 0
+	cancelCharge()
+end
+
+function startCountdown()
+	state = "Countdown"
+	local my = matchToken
+	countdownLabel.Visible = true
+	task.spawn(function()
+		for i = 3, 1, -1 do
+			if matchToken ~= my then return end
+			countdownLabel.Text = tostring(i)
+			countdownScale.Scale = 1.5
+			TweenService:Create(countdownScale, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+			task.wait(0.65)
+		end
+		if matchToken ~= my then return end
+		countdownLabel.Text = "⚽ ИГРА!"
+		countdownScale.Scale = 1.4
+		TweenService:Create(countdownScale, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+		state = "Playing"
+		task.wait(0.45)
+		if matchToken == my then
+			countdownLabel.Visible = false
+		end
+	end)
+end
+
+function startMatch()
+	matchToken = matchToken + 1
+	currentDiff = DIFFICULTIES[selectedDiffKey]
+	playerScore, botScore = 0, 0
+	shotsPlayer, shotsBot = 0, 0
+	timeLeft = SETTINGS.MATCH_TIME
+	overtime = false
+	keysDown = {}
+	cancelCharge()
+
+	diffBadgeLabel.Text = "БОТ: " .. currentDiff.Title
+	menuFrame.Visible = false
+	gameFrame.Visible = true
+	pauseOverlay.Visible = false
+	finishOverlay.Visible = false
+	goalBanner.Visible = false
+
+	resetKickoff("player") -- первый мяч с центра — у игрока, честно 😉
+	updateHUD()
+	startCountdown()
+end
+
+function goToMenu()
+	matchToken = matchToken + 1
+	state = "Menu"
+	cancelCharge()
+	keysDown = {}
+	pauseOverlay.Visible = false
+	finishOverlay.Visible = false
+	countdownLabel.Visible = false
+	goalBanner.Visible = false
+	toastLabel.Visible = false
+	gameFrame.Visible = false
+	menuFrame.Visible = true
+end
+
+local function togglePause(forcePause)
+	if state == "Playing" or (forcePause and state == "Countdown") then
+		state = "Paused"
+		cancelCharge()
+		pauseOverlay.Visible = true
+	elseif state == "Paused" and not forcePause then
+		state = "Playing"
+		pauseOverlay.Visible = false
+	end
+end
+
+function finishMatch()
+	state = "Finished"
+	cancelCharge()
+	countdownLabel.Visible = false
+	goalBanner.Visible = false
+
+	local playerWon = playerScore > botScore
+	if playerWon then
+		finishTitle.Text = "🏆 ПОБЕДА!"
+		finishTitle.TextColor3 = COL.Yellow
+	else
+		finishTitle.Text = "😤 ПОРАЖЕНИЕ"
+		finishTitle.TextColor3 = Color3.fromRGB(255, 110, 100)
+	end
+	finishScore.Text = tostring(playerScore) .. "  :  " .. tostring(botScore)
+	local reason
+	if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS then
+		reason = "Матч до " .. tostring(SETTINGS.WIN_GOALS) .. " голов завершён досрочно."
+	elseif overtime then
+		reason = "Всё решил ЗОЛОТОЙ ГОЛ в дополнительное время!"
+	else
+		reason = "Время матча вышло."
+	end
+	finishStats.Text = reason
+		.. "\nУдары: ВЫ " .. tostring(shotsPlayer) .. " — " .. tostring(shotsBot) .. " БОТ"
+		.. "\nСложность: " .. currentDiff.Title
+	finishOverlay.Visible = true
+end
+
+-- Конфетти при голе 🎉
+local function spawnConfetti()
+	local colors = {
+		Color3.fromRGB(255, 214, 10), Color3.fromRGB(0, 200, 120),
+		Color3.fromRGB(0, 150, 255), Color3.fromRGB(255, 90, 160),
+		Color3.fromRGB(255, 255, 255),
+	}
+	for _ = 1, 26 do
+		local piece = create("Frame", {
+			Position = UDim2.new(rng:NextNumber(0, 1), 0, 0, -20),
+			Size = UDim2.new(0, rng:NextInteger(6, 12), 0, rng:NextInteger(8, 16)),
+			BackgroundColor3 = colors[rng:NextInteger(1, #colors)],
+			BorderSizePixel = 0,
+			ZIndex = 45,
+		}, gameFrame)
+		local drift = rng:NextNumber(-0.06, 0.06)
+		TweenService:Create(piece, TweenInfo.new(rng:NextNumber(0.9, 1.4), Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Position = UDim2.new(clamp(piece.Position.X.Scale + drift, 0, 1), 0, 1, 30),
+			Rotation = rng:NextInteger(180, 540),
+		}):Play()
+		Debris:AddItem(piece, 1.6)
+	end
+end
+
+function onGoal(scorer) -- scorer: "player" или "Bot"
+	if state ~= "Playing" then
+		return
+	end
+	state = "Goal"
+	cancelCharge()
+	if scorer == "player" then
+		playerScore = playerScore + 1
+	else
+		botScore = botScore + 1
+	end
+	updateHUD()
+
+	goalBanner.Text = (scorer == "player") and "⚽ ГООООЛ!" or "⚽ ГОЛ БОТА..."
+	goalBanner.TextColor3 = (scorer == "player") and COL.Yellow or Color3.fromRGB(255, 110, 100)
+	goalBanner.Visible = true
+	goalBannerScale.Scale = 0.4
+	TweenService:Create(goalBannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	playSfx(SFX.Kick, 0.6, 1.4)
+	if scorer == "player" then
+		spawnConfetti()
+	end
+
+	local my = matchToken
+	task.delay(1.8, function()
+		if matchToken ~= my then return end
+		goalBanner.Visible = false
+		if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS or overtime then
+			finishMatch()
+		else
+			-- Мяч с центра получает пропустившая команда
+			resetKickoff(scorer == "player" and "Bot" or "player")
+			startCountdown()
+		end
+	end)
+end
+
+-- Удар по мячу. Возвращает true, если мяч был в радиусе удара.
+local function kickBall(isBot, aimPoint, power01)
+	local chipPos = isBot and botPos or playerPos
+	local chipVel = isBot and botVel or playerVel
+	local toBall = ballPos - chipPos
+	if toBall.Magnitude > PLAYER_R + BALL_R + 30 then
+		return false
+	end
+	local dir = unit2(aimPoint - ballPos)
+	if dir.Magnitude < 0.01 then
+		dir = isBot and Vector2.new(-1, 0) or Vector2.new(1, 0)
+	end
+	local p = clamp(power01, 0, 1)
+	local speed
+	if isBot then
+		speed = 260 + p * currentDiff.KickPower
+	else
+		speed = 300 + p * 820
+	end
+	ballVel = dir * speed + chipVel * 0.15
+	if isBot then
+		shotsBot = shotsBot + 1
+	else
+		shotsPlayer = shotsPlayer + 1
+	end
+	playSfx(SFX.Kick, 0.35 + p * 0.35, 0.9 + p * 0.4)
+	-- Мяч чуть «пульсирует» от удара
+	task.spawn(function()
+		ballFrame.Size = fieldSizeToUI(BALL_R * 2 * 1.3, BALL_R * 2 * 1.3)
+		task.wait(0.06)
+		ballFrame.Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2)
+	end)
+	return true
+end
+
+-- Отпустили ЛКМ / кнопку УДАР
+local function releaseKick()
+	if not isCharging or state ~= "Playing" then
+		cancelCharge()
+		return
+	end
+	local power = math.max(chargePower, 0.15)
+	local aim
+	if chargeAimToGoal then
+		-- Телефонная кнопка: бьём по углу ворот бота, дальнему от самого бота
+		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
+		aim = Vector2.new(FIELD_W, cornerY)
+	else
+		aim = screenToField(mouseGuiPos())
+	end
+	isCharging = false
+	powerBarBg.Visible = false
+	aimLine.Visible = false
+
+	if not kickBall(false, aim, power) then
+		-- Мяч далеко — вместо удара делаем рывок к курсору
+		if dashCooldown <= 0 then
+			local d = unit2(aim - playerPos)
+			if d.Magnitude > 0.01 then
+				dashDir = d
+				dashTime = 0.16
+				dashCooldown = 0.8
+			end
+		end
+	end
+	chargePower = 0
+	chargeAimToGoal = false
+end
+
+--------------------------------------------------------------------------------
+--  ИИ БОТА
+--------------------------------------------------------------------------------
+local function botStep(dt)
+	botThinkTimer = botThinkTimer - dt
+	botKickCooldown = math.max(0, botKickCooldown - dt)
+	local d = currentDiff
+
+	-- «Мозг» бота просыпается раз в Reaction секунд (у сложного — чаще)
+	if botThinkTimer <= 0 then
+		botThinkTimer = d.Reaction
+
+		-- Предсказание: куда мяч прилетит (сложный бот предвидит лучше)
+		local distToBall = (ballPos - botPos).Magnitude
+		local predicted = ballPos + ballVel * (d.Predict * clamp(distToBall / 500, 0, 1))
+		predicted = Vector2.new(
+			clamp(predicted.X, BALL_R, FIELD_W - BALL_R),
+			clamp(predicted.Y, BALL_R, FIELD_H - BALL_R)
+		)
+
+		local botDist = (predicted - botPos).Magnitude
+		local playerDist = (predicted - playerPos).Magnitude
+		local ballThreat = ballPos.X > 740 and ballVel.X > 140 -- мяч летит в ворота бота!
+		local attackLine = 560 - d.Aggression * 180            -- насколько глубоко бот прессингует
+		local shouldAttack = ballThreat
+			or predicted.X > attackLine
+			or botDist < playerDist * 0.95
+			or ballIdleTimer > 3                              -- мяч застрял — бот сам идёт за ним
+
+		if shouldAttack then
+			if botDist > 72 then
+				-- Заходим к мячу со стороны СВОИХ ворот (справа),
+				-- чтобы толкать и бить его в сторону ворот игрока (влево)
+				botTargetPos = predicted + Vector2.new(PLAYER_R * 0.95, clamp((predicted.Y - GOAL_CENTER_Y) * 0.18, -22, 22))
+			else
+				botTargetPos = predicted
+			end
+		else
+			-- Оборона: встаём между мячом и своими воротами
+			local goalPos = Vector2.new(FIELD_W, GOAL_CENTER_Y)
+			local dirToBall = unit2(ballPos - goalPos)
+			local defPos = goalPos + dirToBall * 230
+			botTargetPos = Vector2.new(clamp(defPos.X, 610, 940), clamp(defPos.Y, 90, FIELD_H - 90))
+		end
+	end
+
+	-- Движение к цели (плавный разгон/торможение)
+	local toTarget = botTargetPos - botPos
+	local desired = Vector2.new(0, 0)
+	if toTarget.Magnitude > 5 then
+		desired = unit2(toTarget) * d.Speed
+	end
+	botVel = botVel:Lerp(desired, clamp(dt * 8, 0, 1))
+	botPos = botPos + botVel * dt
+	botPos = Vector2.new(
+		clamp(botPos.X, PLAYER_R, FIELD_W - PLAYER_R),
+		clamp(botPos.Y, PLAYER_R, FIELD_H - PLAYER_R)
+	)
+
+	-- Решение об ударе
+	if botKickCooldown <= 0 and (ballPos - botPos).Magnitude <= PLAYER_R + BALL_R + 16 then
+		local aim, power
+		if ballPos.X > 820 then
+			-- Опасно у своих ворот — вынос на фланг, подальше от игрока
+			aim = Vector2.new(300, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
+			power = 0.78
+		elseif ballPos.X < d.ShootX then
+			-- Удар по воротам: в угол, дальний от игрока
+			local cornerY = (playerPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
+			aim = Vector2.new(0, cornerY)
+			power = 0.85
+		else
+			-- Ведение: проталкиваем мяч вперёд (влево) в свободную зону
+			local sideStep = (playerPos.Y < ballPos.Y) and 95 or -95
+			aim = Vector2.new(ballPos.X - 260, clamp(ballPos.Y + sideStep, 50, FIELD_H - 50))
+			power = 0.42
+		end
+		-- Ошибка прицела зависит от сложности
+		local errRad = math.rad(rng:NextNumber(-d.AimError, d.AimError))
+		local finalDir = rotate2(unit2(aim - ballPos), errRad)
+		local finalAim = ballPos + finalDir * 220
+		if kickBall(true, finalAim, power) then
+			botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+--  ФИЗИКА
+--------------------------------------------------------------------------------
+local function playerStep(dt)
+	dashCooldown = math.max(0, dashCooldown - dt)
+
+	local move = Vector2.new(0, 0)
+	if touchActive then
+		local toTouch = touchFieldPos - playerPos
+		if toTouch.Magnitude > 14 then
+			move = unit2(toTouch)
+		end
+	elseif not UserInputService:GetFocusedTextBox() then
+		if keysDown[Enum.KeyCode.W] or keysDown[Enum.KeyCode.Up] then move = move + Vector2.new(0, -1) end
+		if keysDown[Enum.KeyCode.S] or keysDown[Enum.KeyCode.Down] then move = move + Vector2.new(0, 1) end
+		if keysDown[Enum.KeyCode.A] or keysDown[Enum.KeyCode.Left] then move = move + Vector2.new(-1, 0) end
+		if keysDown[Enum.KeyCode.D] or keysDown[Enum.KeyCode.Right] then move = move + Vector2.new(1, 0) end
+	end
+
+	if dashTime > 0 then
+		dashTime = dashTime - dt
+		playerVel = dashDir * 640
+	else
+		local speed = SETTINGS.PLAYER_SPEED
+		if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] then
+			speed = SETTINGS.PLAYER_SPRINT
+		end
+		if isCharging then
+			speed = speed * 0.7 -- пока целишься — идёшь медленнее
+		end
+		local desired = Vector2.new(0, 0)
+		if move.Magnitude > 0.01 then
+			desired = unit2(move) * speed
+		end
+		playerVel = playerVel:Lerp(desired, clamp(dt * 12, 0, 1))
+	end
+
+	playerPos = playerPos + playerVel * dt
+	playerPos = Vector2.new(
+		clamp(playerPos.X, PLAYER_R, FIELD_W - PLAYER_R),
+		clamp(playerPos.Y, PLAYER_R, FIELD_H - PLAYER_R)
+	)
+end
+
+-- Фишки не проходят друг сквозь друга
+local function resolveChipChip()
+	local diff = botPos - playerPos
+	local dist = diff.Magnitude
+	local minDist = PLAYER_R * 2
+	if dist > 0.001 and dist < minDist then
+		local push = unit2(diff) * ((minDist - dist) / 2)
+		playerPos = playerPos - push
+		botPos = botPos + push
+		playerPos = Vector2.new(clamp(playerPos.X, PLAYER_R, FIELD_W - PLAYER_R), clamp(playerPos.Y, PLAYER_R, FIELD_H - PLAYER_R))
+		botPos = Vector2.new(clamp(botPos.X, PLAYER_R, FIELD_W - PLAYER_R), clamp(botPos.Y, PLAYER_R, FIELD_H - PLAYER_R))
+	end
+end
+
+-- Толчок мяча фишкой при ведении (дриблинг)
+local function collideBallWithChip(chipPos, chipVel)
+	local diff = ballPos - chipPos
+	local dist = diff.Magnitude
+	local minDist = PLAYER_R + BALL_R
+	if dist > 0.001 and dist < minDist then
+		local n = diff / dist
+		ballPos = chipPos + n * minDist
+		local chipSpeedAlong = chipVel:Dot(n)
+		local ballSpeedAlong = ballVel:Dot(n)
+		if ballSpeedAlong < chipSpeedAlong then
+			ballVel = ballVel + n * ((chipSpeedAlong - ballSpeedAlong) * 1.18)
+		end
+		-- Не даём мячу от простого ведения улететь как от удара
+		if ballVel.Magnitude > 560 and (ballPos - chipPos).Magnitude <= minDist + 2 then
+			-- (скорость после УДАРА не режем: удар сразу задаёт большую скорость
+			--  и мяч быстро выходит из зоны minDist+2)
+		end
+	end
+end
+
+local function inGoalMouth(y)
+	return y > GOAL_Y1 and y < GOAL_Y2
+end
+
+local function ballStep(dt)
+	-- Два подшага — быстрый мяч не пролетает сквозь фишки и штанги
+	for _ = 1, 2 do
+		local sdt = dt / 2
+		collideBallWithChip(playerPos, playerVel)
+		collideBallWithChip(botPos, botVel)
+
+		ballPos = ballPos + ballVel * sdt
+		ballVel = ballVel * math.pow(0.55, sdt) -- трение о газон
+		if ballVel.Magnitude < 6 then
+			ballVel = Vector2.new(0, 0)
+		end
+		if ballVel.Magnitude > 1200 then
+			ballVel = unit2(ballVel) * 1200
+		end
+
+		-- Штанги
+		for _, post in ipairs(POSTS) do
+			local diff = ballPos - post
+			local dist = diff.Magnitude
+			local minDist = BALL_R + 7
+			if dist > 0.001 and dist < minDist then
+				local n = diff / dist
+				ballPos = post + n * minDist
+				local vn = ballVel:Dot(n)
+				if vn < 0 then
+					ballVel = (ballVel - n * (2 * vn)) * 0.75
+					playSfx(SFX.Bounce, 0.3, 1.6)
+				end
+			end
+		end
+
+		-- Верхний и нижний бортики
+		if ballPos.Y < BALL_R then
+			ballPos = Vector2.new(ballPos.X, BALL_R)
+			ballVel = Vector2.new(ballVel.X, math.abs(ballVel.Y) * 0.78)
+		elseif ballPos.Y > FIELD_H - BALL_R then
+			ballPos = Vector2.new(ballPos.X, FIELD_H - BALL_R)
+			ballVel = Vector2.new(ballVel.X, -math.abs(ballVel.Y) * 0.78)
+		end
+
+		-- Левые ворота (игрока) / левая стенка
+		if ballPos.X < BALL_R then
+			if inGoalMouth(ballPos.Y) then
+				if ballPos.X < -10 then
+					onGoal("Bot")
+					return
+				end
+			else
+				ballPos = Vector2.new(BALL_R, ballPos.Y)
+				ballVel = Vector2.new(math.abs(ballVel.X) * 0.78, ballVel.Y)
+			end
+		end
+		-- Правые ворота (бота) / правая стенка
+		if ballPos.X > FIELD_W - BALL_R then
+			if inGoalMouth(ballPos.Y) then
+				if ballPos.X > FIELD_W + 10 then
+					onGoal("player")
+					return
+				end
+			else
+				ballPos = Vector2.new(FIELD_W - BALL_R, ballPos.Y)
+				ballVel = Vector2.new(-math.abs(ballVel.X) * 0.78, ballVel.Y)
+			end
+		end
+	end
+end
+
+local function playingStep(dt)
+	playerStep(dt)
+	botStep(dt)
+	resolveChipChip()
+	ballStep(dt)
+	if state ~= "Playing" then
+		return -- забили гол прямо в ballStep
+	end
+
+	-- Застрявший мяч (для логики бота)
+	if ballVel.Magnitude < 25
+		and (ballPos - playerPos).Magnitude > 120
+		and (ballPos - botPos).Magnitude > 120 then
+		ballIdleTimer = ballIdleTimer + dt
+	else
+		ballIdleTimer = 0
+	end
+
+	-- Таймер матча 2:00
+	if not overtime then
+		timeLeft = timeLeft - dt
+		if timeLeft <= 0 then
+			timeLeft = 0
+			if playerScore == botScore then
+				overtime = true
+				showToast("⚡ ЗОЛОТОЙ ГОЛ! Следующий гол — победный!", 2.5)
+			else
+				updateHUD()
+				finishMatch()
+				return
+			end
+		end
+	end
+	updateHUD()
+end
+
+-- Во время баннера «ГОЛ» мяч просто докатывается в сетке
+local function ballSettleStep(dt)
+	ballPos = ballPos + ballVel * dt
+	ballVel = ballVel * math.pow(0.25, dt)
+	ballPos = Vector2.new(
+		clamp(ballPos.X, -36, FIELD_W + 36),
+		clamp(ballPos.Y, BALL_R, FIELD_H - BALL_R)
+	)
+end
+
+local function render()
+	playerChip.Position = fieldPosToUI(playerPos)
+	botChip.Position = fieldPosToUI(botPos)
+	ballFrame.Position = fieldPosToUI(ballPos)
+end
+
+local function chargeStep(dt)
+	if not isCharging then
+		return
+	end
+	chargePower = clamp(chargePower + dt / 0.75, 0, 1)
+	powerBarFill.Size = UDim2.fromScale(chargePower, 1)
+	if chargePower < 0.5 then
+		powerBarFill.BackgroundColor3 = Color3.fromRGB(46, 204, 113):Lerp(COL.Yellow, chargePower * 2)
+	else
+		powerBarFill.BackgroundColor3 = COL.Yellow:Lerp(Color3.fromRGB(255, 59, 48), (chargePower - 0.5) * 2)
+	end
+
+	-- Прицел: от мяча (если рядом) или от фишки — в сторону цели
+	local from
+	local aim
+	if chargeAimToGoal then
+		local cornerY = (botPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 20) or (GOAL_Y1 + 20)
+		aim = Vector2.new(FIELD_W, cornerY)
+		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 30) and ballPos or playerPos
+	else
+		aim = screenToField(mouseGuiPos())
+		from = ((ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 30) and ballPos or playerPos
+	end
+	local dir = aim - from
+	if dir.Magnitude > 1 then
+		aimLine.Position = fieldPosToUI(from)
+		aimLine.Rotation = math.deg(math.atan(dir.Y, dir.X))
+		aimLine.Size = UDim2.new((70 + chargePower * 105) / FIELD_W, 0, 0, 5)
+		aimLine.Visible = true
+	end
+end
+
+--================================================================================
+--  УПРАВЛЕНИЕ: клавиатура / мышь / тач
+--================================================================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if input.UserInputType == Enum.UserInputType.Keyboard then
+		keysDown[input.KeyCode] = true
+		if input.KeyCode == Enum.KeyCode.P and not gameProcessed then
+			if state == "Playing" or state == "Paused" then
+				togglePause(false)
+			end
+		end
+		if input.KeyCode == Enum.KeyCode.Space and state == "Playing" and not gameProcessed then
+			-- Быстрый удар по воротам с пробела (бонус)
+			isCharging = true
+			chargeAimToGoal = true
+			chargePower = 0.55
+			releaseKick()
+		end
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1 and state == "Playing" then
+		local mousePos = mouseGuiPos()
+		-- Заряжаем удар ТОЛЬКО по клику внутри поля (клики по кнопкам не трогаем)
+		if isScreenPosInsideField(mousePos) then
+			isCharging = true
+			chargeAimToGoal = false
+			chargePower = 0
+			powerBarBg.Visible = true
+		end
+	end
+
+	if input.UserInputType == Enum.UserInputType.Touch and state == "Playing" then
+		local p = toGuiSpace(Vector2.new(input.Position.X, input.Position.Y))
+		if isScreenPosInsideField(p) then
+			touchActive = true
+			touchFieldPos = screenToField(p)
+		end
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch and touchActive then
+		local p = toGuiSpace(Vector2.new(input.Position.X, input.Position.Y))
+		touchFieldPos = screenToField(p)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Keyboard then
+		keysDown[input.KeyCode] = false
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if isCharging and not chargeAimToGoal then
+			releaseKick()
+		end
+	end
+	if input.UserInputType == Enum.UserInputType.Touch then
+		touchActive = false
+	end
+end)
+
+-- Если окно игры потеряло фокус — не залипаем с зажатыми клавишами
+UserInputService.WindowFocusReleased:Connect(function()
+	keysDown = {}
+	touchActive = false
+	if isCharging then
+		cancelCharge()
+	end
+end)
+
+-- Кнопка УДАР (телефон): держишь — заряд, отпустил — выстрел по воротам
+kickButton.MouseButton1Down:Connect(function()
+	if state == "Playing" then
+		isCharging = true
+		chargeAimToGoal = true
+		chargePower = 0
+		powerBarBg.Visible = true
+	end
+end)
+kickButton.MouseButton1Up:Connect(function()
+	if isCharging and chargeAimToGoal then
+		releaseKick()
+	end
+end)
+
+-- Кнопки на игровом экране
+pauseButton.MouseButton1Click:Connect(function()
+	if state == "Playing" then
+		togglePause(true)
+	end
+end)
+quitToMenuButton.MouseButton1Click:Connect(function()
+	goToMenu()
+end)
+resumeButton.MouseButton1Click:Connect(function()
+	if state == "Paused" then
+		togglePause(false)
+	end
+end)
+restartButtonP.MouseButton1Click:Connect(function()
+	pauseOverlay.Visible = false
+	startMatch()
+end)
+menuButtonP.MouseButton1Click:Connect(function()
+	goToMenu()
+end)
+rematchButton.MouseButton1Click:Connect(function()
+	finishOverlay.Visible = false
+	startMatch()
+end)
+menuButtonF.MouseButton1Click:Connect(function()
+	goToMenu()
+end)
+
+--================================================================================
+--  ГЛАВНЫЙ ЦИКЛ
+--================================================================================
+resetKickoff("player")
+render()
+updateHUD()
+
+RunService.RenderStepped:Connect(function(dt)
+	if dt > 1 / 30 then
+		dt = 1 / 30
+	end
+
+	if menuFrame.Visible then
+		menuBall.Rotation = (menuBall.Rotation + dt * 18) % 360
+	end
+
+	if not gameFrame.Visible then
+		return
+	end
+
+	if state == "Playing" then
+		playingStep(dt)
+		chargeStep(dt)
+	elseif state == "Goal" then
+		ballSettleStep(dt)
+	elseif state == "Countdown" then
+		-- Стоим на местах, ждём свистка
+	end
+
+	-- Мяч катится — крутим его рисунок
+	if state == "Playing" or state == "Goal" then
+		ballFrame.Rotation = (ballFrame.Rotation + ballVel.X * dt * 0.35) % 360
+	end
+
+	render()
+end)
+
+print("[RFC FOOTBALL 2D] Часть 1 загружена ✅ Меню на экране. Жми «ИГРАТЬ 1 на 1»!")
