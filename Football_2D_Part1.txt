@@ -1,9 +1,20 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.7 (МЕНЮ + МАТЧИ 1×1, 2×2 И 3×3)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.8 (МЕНЮ + МАТЧИ 1×1, 2×2 И 3×3)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
 
-  ЧТО НОВОГО В 1.7:
+  ЧТО НОВОГО В 1.8:
+  • ГЛАВНЫЙ ФИКС СКОПЛЕНИЯ: мяч больше не остаётся внутри фишек. Добавлены swept-коллизия
+    (без пролёта сквозь круг), много-контактное выталкивание сразу от всех фишек,
+    поиск свободной точки и автоматический вылет медленного мяча из давки
+  • Поле теперь растёт вместе с составом: 1×1 — 1000×600, 2×2 — 1240×744,
+    3×3 — 1480×888; фишки и мяч при этом не раздуваются, поэтому места реально больше
+  • Гол: звук 132952369664787 + салют-фейерверки. Удар по мячу: звук 9119319842
+  • Кинематографичное лобби по полкам: режим, красные, синие и камера — отдельные
+    стеклянно-градиентные карточки, меньше лишнего текста и ничего не налезает
+  • Сила удара набирается чуть быстрее: полная шкала примерно за 1.45 сек
+
+  ЧТО НОВОГО БЫЛО В 1.7:
   • У стены назначенный бот не уходит от мяча: он доводит боковой вынос до конца;
     если мяч всё равно оказался в мёртвой точке, он сам заметно отлетает в открытую зону
   • На твоей фишке автоматически стоит твой настоящий Roblox-аватар;
@@ -33,7 +44,7 @@
 
   ЧТО НОВОГО В 1.4:
   • Рывок на ЛКМ ПОЛНОСТЬЮ УБРАН: нет касания мяча — персонаж ничего не делает
-  • Сила удара заряжается медленно за 1.8 сек; короткий клик = мягкий пас, не выстрел
+  • Сила удара тогда заряжалась за 1.8 сек; в v1.8 шкала ускорена примерно до 1.45 сек
   • Обновлён футбольный интерфейс и ТВ-табло LIVE
 
   ЧТО НОВОГО В 1.3:
@@ -145,10 +156,18 @@ local SETTINGS = {
 	PLAYER_SPRINT = 360,   -- максимальная скорость на Shift
 	REPLAY_DURATION = 7,   -- повтор гола на экране ровно 7 секунд
 	REPLAY_SOURCE = 3.5,   -- из них берём последние 3.5 сек игры и показываем в 2 раза медленнее
-	CHARGE_TIME = 1.8,     -- полная шкала удара набирается медленно за 1.8 секунды
+	CHARGE_TIME = 1.45,    -- полная шкала удара: всё ещё контролируемо, но чуть быстрее прежнего
 }
 
 --// Виртуальное поле (координаты игры, НЕ пиксели экрана) \\--
+-- Чем больше состав, тем больше само футбольное поле. Радиусы фишек/мяча НЕ
+-- увеличиваются вместе с полем, поэтому в 2×2 и особенно в 3×3 реально просторнее.
+local FIELD_SIZES = {
+	[1] = { W = 1000, H = 600, GoalHalf = 90,  Label = "×1.00" },
+	[2] = { W = 1240, H = 744, GoalHalf = 100, Label = "×1.24" },
+	[3] = { W = 1480, H = 888, GoalHalf = 112, Label = "×1.48" },
+}
+local FIELD_SCALE = 1
 local FIELD_W, FIELD_H = 1000, 600
 local GOAL_Y1, GOAL_Y2 = 210, 390        -- проём ворот по вертикали
 local GOAL_CENTER_Y    = 300
@@ -246,6 +265,10 @@ local BotAI = {
 	ballWallCheckTimer = 0,
 	ballWallLastPos = ballPos,
 	ballWallEscapeCooldown = 0,
+	ballClusterTimer = 0,
+	ballClusterCheckTimer = 0,
+	ballClusterLastPos = ballPos,
+	ballClusterEscapeCooldown = 0,
 	botTargetIsBall = false,
 	botRecoveryTimer = 0,
 	botRecoveryPoint = Vector2.new(500, 300),
@@ -323,6 +346,7 @@ local UI = {
 	enemyDiffButtons = {},
 	allyDiffButtons = {},
 	cameraButtons = {},
+	postFrames = {},
 }
 
 --// Маленькие помощники \\--
@@ -403,8 +427,9 @@ local function applyFieldClamp(pos, vel, r)
 end
 
 local function isInCornerZone(pos, pad)
-	return (pos.X < pad or pos.X > FIELD_W - pad)
-		and (pos.Y < pad or pos.Y > FIELD_H - pad)
+	local scaledPad = pad * FIELD_SCALE -- угловая зона растёт вместе с большим полем
+	return (pos.X < scaledPad or pos.X > FIELD_W - scaledPad)
+		and (pos.Y < scaledPad or pos.Y > FIELD_H - scaledPad)
 end
 
 -- Ближайшая стена и направление ВНУТРЬ поля. Это общая защита для всех ботов.
@@ -480,9 +505,9 @@ local function getWallExtraction(ballPosition, attackDirX, preferredTarget, from
 		if fromPos and math.abs(fromPos.X - ballPosition.X) >= 18 then
 			tx = (fromPos.X <= ballPosition.X) and 1 or -1
 		end
-		if ballPosition.X < 170 then
+		if ballPosition.X < 170 * FIELD_SCALE then
 			tx = 1
-		elseif ballPosition.X > FIELD_W - 170 then
+		elseif ballPosition.X > FIELD_W - 170 * FIELD_SCALE then
 			tx = -1
 		end
 		tangent = Vector2.new(tx, 0)
@@ -495,15 +520,15 @@ local function getWallExtraction(ballPosition, attackDirX, preferredTarget, from
 		else
 			ty = (ballPosition.Y < GOAL_CENTER_Y) and 1 or -1
 		end
-		if ballPosition.Y < 170 then
+		if ballPosition.Y < 170 * FIELD_SCALE then
 			ty = 1
-		elseif ballPosition.Y > FIELD_H - 170 then
+		elseif ballPosition.Y > FIELD_H - 170 * FIELD_SCALE then
 			ty = -1
 		end
 		tangent = Vector2.new(0, ty)
 	end
 	local extractionDir = unit2(tangent + inward * 0.42)
-	local aim = clampToField(ballPosition + tangent * 270 + inward * 145, BALL_R)
+	local aim = clampToField(ballPosition + tangent * (270 * FIELD_SCALE) + inward * (145 * FIELD_SCALE), BALL_R)
 	local approach = clampToField(ballPosition - tangent * 34 + inward * 25, PLAYER_R + 4)
 	return true, approach, aim, extractionDir, tangent, inward
 end
@@ -553,7 +578,7 @@ local function limitBotVelocityAtWall(pos, desired, allowContact)
 		return desired
 	end
 	local inwardSpeed = desired:Dot(inward) -- отрицательная = движение к стене
-	local allowedInwardSpeed = -math.max(0, wallDist - BOT_TARGET_MARGIN) * 4
+	local allowedInwardSpeed = -math.max(0, wallDist - BOT_TARGET_MARGIN) * (4 * FIELD_SCALE)
 	if inwardSpeed < allowedInwardSpeed then
 		return desired + inward * (allowedInwardSpeed - inwardSpeed)
 	end
@@ -643,9 +668,9 @@ end
 local SFX = {
 	-- Тихие и лёгкие звуки. Если какого-то нет в твоей игре — просто будет тишина.
 	Click    = "rbxasset://sounds/clickfast.wav",
-	Kick     = "rbxasset://sounds/collide.wav",
+	Kick     = "rbxassetid://9119319842", -- звук удара по мячу (по запросу)
 	Bounce   = "rbxasset://sounds/collide.wav",
-	Applause = "rbxassetid://2397585192", -- аплодисменты/радость трибун при голе
+	Goal     = "rbxassetid://132952369664787", -- звук гола + фейерверки (по запросу)
 }
 
 local function makeButton(parent, props)
@@ -676,7 +701,7 @@ local function makeButton(parent, props)
 	return btn
 end
 
--- Конвертеры координат: виртуальное поле 1000x600 <-> экран
+-- Конвертеры координат: динамическое виртуальное поле <-> экран
 -- ВНИМАНИЕ: GetMouseLocation() и InputObject.Position считают   от   верхнего   угла   окна (с топбаром),
 -- а AbsolutePosition у GUI — уже БЕЗ него. Вычитаем GuiInset, иначе прицел съедет на ~36 пикселей по Y.
 local function toGuiSpace(rawPos)
@@ -772,7 +797,7 @@ UI.menuFrame = create("Frame", {
 	BorderSizePixel = 0,
 	ZIndex = 1,
 }, UI.screenGui)
-addGradient(UI.menuFrame, Color3.fromRGB(8, 32, 22), Color3.fromRGB(5, 12, 26), 90)
+addGradient(UI.menuFrame, Color3.fromRGB(4, 24, 46), Color3.fromRGB(2, 6, 16), 35)
 
 -- ЛОББИ СПЕЦИАЛЬНО БЕЗ ПОЛЯ И БЕЗ лишних картинок:
 -- только ровные отдельные ряды, ничего не залезает одно на другое.
@@ -792,6 +817,30 @@ local function addRainbowGradient(obj)
 	g.Parent = obj
 	return g
 end
+
+-- Кинематографичный фон без поля и без лишних картинок: мягкое свечение команд
+-- и два луча прожекторов находятся ПОД панелью и не перекрывают ни одной кнопки.
+local function addMenuGlow(name, x, y, w, h, color, transparency, rotation)
+	local glow = create("Frame", {
+		Name = name,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(x, y),
+		Size = UDim2.fromScale(w, h),
+		Rotation = rotation or 0,
+		BackgroundColor3 = color,
+		BackgroundTransparency = transparency,
+		BorderSizePixel = 0,
+		ZIndex = 2,
+	}, UI.menuFrame)
+	addCorner(glow, 1, 0)
+	addGradient(glow, Color3.fromRGB(255, 255, 255), Color3.fromRGB(70, 90, 115), 35)
+	return glow
+end
+addMenuGlow("BlueCinemaGlow", 0.075, 0.48, 0.30, 0.46, Color3.fromRGB(0, 105, 255), 0.86, -8)
+addMenuGlow("RedCinemaGlow", 0.925, 0.48, 0.30, 0.46, Color3.fromRGB(255, 45, 60), 0.86, 8)
+addMenuGlow("GoldCinemaGlow", 0.50, 0.065, 0.48, 0.20, Color3.fromRGB(255, 190, 45), 0.92, 0)
+addMenuGlow("SpotlightLeft", 0.27, 0.17, 0.70, 0.025, COL.White, 0.95, -17)
+addMenuGlow("SpotlightRight", 0.73, 0.17, 0.70, 0.025, COL.White, 0.95, 17)
 
 -- Название игры: ROBALL радугой и со свечением
 local titleLabel = makeText(UI.menuFrame, {
@@ -827,7 +876,7 @@ makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(0.5, 0),
 	Position = UDim2.fromScale(0.5, 0.198),
 	Size = UDim2.fromScale(0.82, 0.042),
-	Text = "КАТАЛОГ МАТЧА  •  СОБЕРИ СВОЮ КОМАНДУ",
+	Text = "СОБЕРИ СВОЮ КОМАНДУ",
 	Font = Enum.Font.GothamBold,
 	TextSize = 20,
 	TextScaled = true,
@@ -838,20 +887,31 @@ makeText(UI.menuFrame, {
 end -- заголовок лобби
 
 do -- каталог настроек: панели, карточки и refresh-кнопки нужны как локалы только при построении
--- Центральная панель-каталог: каждая настройка лежит в своей отдельной карточке.
+-- Центральная панель-каталог: каждая настройка лежит на своей отдельной полке.
+local menuPanelShadow = create("Frame", {
+	Name = "PanelShadow",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.506, 0.598),
+	Size = UDim2.fromScale(0.716, 0.676),
+	BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+	BackgroundTransparency = 0.58,
+	BorderSizePixel = 0,
+	ZIndex = 4,
+}, UI.menuFrame)
+addCorner(menuPanelShadow, 0, 26)
 local menuPanel = create("Frame", {
 	Name = "Panel",
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	Position = UDim2.fromScale(0.5, 0.590),
-	Size = UDim2.fromScale(0.70, 0.660),
+	Size = UDim2.fromScale(0.72, 0.660),
 	BackgroundColor3 = COL.Panel,
-	BackgroundTransparency = 0.03,
+	BackgroundTransparency = 0.08,
 	BorderSizePixel = 0,
 	ZIndex = 5,
 }, UI.menuFrame)
-addCorner(menuPanel, 0, 22)
-addStroke(menuPanel, COL.White, 2, 0.62)
-addGradient(menuPanel, Color3.fromRGB(19, 38, 56), Color3.fromRGB(7, 15, 25), 90)
+addCorner(menuPanel, 0, 26)
+addStroke(menuPanel, Color3.fromRGB(120, 220, 255), 2, 0.38)
+addGradient(menuPanel, Color3.fromRGB(29, 38, 78), Color3.fromRGB(4, 13, 26), 35)
 local menuPanelAccent = create("Frame", {
 	Position = UDim2.fromScale(0.035, 0),
 	Size = UDim2.new(0.93, 0, 0, 5),
@@ -863,7 +923,7 @@ addCorner(menuPanelAccent, 1, 0)
 addGradient(menuPanelAccent, Color3.fromRGB(46, 230, 140), Color3.fromRGB(25, 160, 255), 0)
 
 local playButton
-local enemyCardNote, allyCardNote
+local enemyCardNote, allyCardNote, modeCardNote, cameraCardNote
 
 local function makeOptionButton(parent, name, x, y, w, h, text)
 	local btn = makeButton(parent, {
@@ -881,8 +941,10 @@ local function makeOptionButton(parent, name, x, y, w, h, text)
 	})
 	create("UITextSizeConstraint", { MaxTextSize = 19 }, btn)
 	addCorner(btn, 0, 14)
-	local stroke = addStroke(btn, COL.White, 2, 0.78)
-	-- Без градиента: выбранные цвета сложности/режима должны оставаться честными и яркими.
+	local stroke = addStroke(btn, COL.White, 2, 0.72)
+	-- Нейтральный блик белый→серый: выбранный цвет кнопки остаётся честным,
+	-- но поверхность выглядит стеклянной, а не плоской заливкой.
+	addGradient(btn, Color3.fromRGB(255, 255, 255), Color3.fromRGB(145, 160, 180), 90)
 	return { Button = btn, Stroke = stroke }
 end
 
@@ -897,8 +959,8 @@ local function makeCatalogCard(name, x, y, w, h, title, accentColor)
 		ZIndex = 6,
 	}, menuPanel)
 	addCorner(card, 0, 16)
-	addStroke(card, COL.White, 1, 0.70)
-	addGradient(card, Color3.fromRGB(18, 38, 55), Color3.fromRGB(7, 16, 27), 90)
+	addStroke(card, Color3.fromRGB(170, 220, 255), 1, 0.55)
+	addGradient(card, Color3.fromRGB(28, 56, 88), Color3.fromRGB(5, 12, 24), 35)
 	local accentLine = create("Frame", {
 		Position = UDim2.fromScale(0.04, 0),
 		Size = UDim2.new(0.92, 0, 0, 5),
@@ -930,25 +992,18 @@ local function makeCatalogCard(name, x, y, w, h, title, accentColor)
 	return card, note
 end
 
-makeText(menuPanel, {
-	Position = UDim2.fromScale(0.04, 0.024),
-	Size = UDim2.fromScale(0.92, 0.042),
-	Text = "РЕЖИМ МАТЧА",
-	Font = Enum.Font.GothamBlack,
-	TextSize = 17,
-	TextScaled = true,
-	TextColor3 = Color3.fromRGB(205, 218, 230),
-	TextXAlignment = Enum.TextXAlignment.Left,
-	ZIndex = 6,
-})
-UI.modeButtons["1v1"] = makeOptionButton(menuPanel, "Mode_1v1", 0.04, 0.073, 0.293, 0.096, "1 НА 1\n⚔ ДУЭЛЬ")
-UI.modeButtons["2v2"] = makeOptionButton(menuPanel, "Mode_2v2", 0.353, 0.073, 0.293, 0.096, "2 НА 2\n🤝 КОМАНДА")
-UI.modeButtons["3v3"] = makeOptionButton(menuPanel, "Mode_3v3", 0.667, 0.073, 0.293, 0.096, "3 НА 3\n🔥 СОСТАВ")
+-- ПОЛКА 1: режим матча. Сразу видно, во сколько раз вырастет поле.
+local modeCard
+modeCard, modeCardNote = makeCatalogCard("ModeCatalog", 0.04, 0.025, 0.92, 0.185, "⚔  РЕЖИМ МАТЧА", COL.GreenBtn)
+UI.modeButtons["1v1"] = makeOptionButton(modeCard, "Mode_1v1", 0.035, 0.285, 0.293, 0.50, "1 НА 1\nПОЛЕ ×1.00")
+UI.modeButtons["2v2"] = makeOptionButton(modeCard, "Mode_2v2", 0.354, 0.285, 0.293, 0.50, "2 НА 2\nПОЛЕ ×1.24")
+UI.modeButtons["3v3"] = makeOptionButton(modeCard, "Mode_3v3", 0.672, 0.285, 0.293, 0.50, "3 НА 3\nПОЛЕ ×1.48")
+modeCardNote.Size = UDim2.fromScale(0.92, 0.14)
 
 local enemyCard
-enemyCard, enemyCardNote = makeCatalogCard("EnemyCatalog", 0.04, 0.198, 0.45, 0.335, "🔴 КРАСНАЯ КОМАНДА", COL.Bot)
+enemyCard, enemyCardNote = makeCatalogCard("EnemyCatalog", 0.04, 0.228, 0.45, 0.305, "🔴 КРАСНАЯ КОМАНДА", COL.Bot)
 local allyCard
-allyCard, allyCardNote = makeCatalogCard("AllyCatalog", 0.51, 0.198, 0.45, 0.335, "🔵 ТВОИ НАПАРНИКИ", COL.Player)
+allyCard, allyCardNote = makeCatalogCard("AllyCatalog", 0.51, 0.228, 0.45, 0.305, "🔵 ТВОИ НАПАРНИКИ", COL.Player)
 
 for i, key in ipairs(DIFF_ORDER) do
 	local d = DIFFICULTIES[key]
@@ -957,24 +1012,18 @@ for i, key in ipairs(DIFF_ORDER) do
 	UI.allyDiffButtons[key] = makeOptionButton(allyCard, "AllyDiff_" .. key, 0.07, y, 0.86, 0.19, d.ButtonText)
 end
 
-makeText(menuPanel, {
-	Position = UDim2.fromScale(0.04, 0.558),
-	Size = UDim2.fromScale(0.92, 0.042),
-	Text = "ВИД ПОЛЯ",
-	Font = Enum.Font.GothamBlack,
-	TextSize = 17,
-	TextScaled = true,
-	TextColor3 = Color3.fromRGB(205, 218, 230),
-	TextXAlignment = Enum.TextXAlignment.Left,
-	ZIndex = 6,
-})
-UI.cameraButtons.Full = makeOptionButton(menuPanel, "Camera_Full", 0.04, 0.606, 0.45, 0.076, "🗺  ВСЁ ПОЛЕ")
-UI.cameraButtons.Close = makeOptionButton(menuPanel, "Camera_Close", 0.51, 0.606, 0.45, 0.076, "🎯  ТОЛЬКО Я")
+-- ПОЛКА 3: камера отдельно от команд и режима.
+local cameraCard
+cameraCard, cameraCardNote = makeCatalogCard("CameraCatalog", 0.04, 0.551, 0.92, 0.145, "🎥  ВИД ПОЛЯ", Color3.fromRGB(80, 190, 255))
+UI.cameraButtons.Full = makeOptionButton(cameraCard, "Camera_Full", 0.035, 0.315, 0.45, 0.46, "🗺  ВСЁ ПОЛЕ")
+UI.cameraButtons.Close = makeOptionButton(cameraCard, "Camera_Close", 0.515, 0.315, 0.45, 0.46, "🎯  ТОЛЬКО Я")
+cameraCardNote.Size = UDim2.fromScale(0.92, 0.14)
+cameraCardNote.Text = "Можно переключить прямо во время матча"
 
 UI.menuSummaryLabel = makeText(menuPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.702),
-	Size = UDim2.fromScale(0.9, 0.062),
+	Position = UDim2.fromScale(0.5, 0.714),
+	Size = UDim2.fromScale(0.9, 0.052),
 	BackgroundColor3 = Color3.fromRGB(7, 18, 30),
 	BackgroundTransparency = 0.18,
 	Text = "",
@@ -989,8 +1038,8 @@ addStroke(UI.menuSummaryLabel, COL.White, 1, 0.68)
 playButton = makeButton(menuPanel, {
 	Name = "PlayButton",
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.790),
-	Size = UDim2.fromScale(0.86, 0.135),
+	Position = UDim2.fromScale(0.5, 0.782),
+	Size = UDim2.fromScale(0.86, 0.125),
 	BackgroundColor3 = COL.GreenBtn,
 	Text = "▶  ИГРАТЬ 1 НА 1",
 	Font = Enum.Font.GothamBlack,
@@ -999,14 +1048,15 @@ playButton = makeButton(menuPanel, {
 	TextWrapped = false,
 	ZIndex = 7,
 })
-addCorner(playButton, 0, 18)
-addStroke(playButton, COL.White, 2, 0.30)
+addCorner(playButton, 0, 20)
+addStroke(playButton, COL.White, 2, 0.22)
+addGradient(playButton, Color3.fromRGB(255, 255, 255), Color3.fromRGB(120, 210, 160), 90)
 
 makeText(menuPanel, {
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.fromScale(0.5, 0.932),
+	Position = UDim2.fromScale(0.5, 0.922),
 	Size = UDim2.fromScale(0.92, 0.045),
-	Text = "До 3 голов  •  Матч 2:00  •  После гола: повтор, затем отсчёт 3-2-1",
+	Text = "До 3 голов  •  2:00  •  повтор после гола",
 	TextSize = 13,
 	TextScaled = true,
 	TextColor3 = Color3.fromRGB(165, 180, 195),
@@ -1017,13 +1067,19 @@ local function refreshMenuSummary()
 	local enemyName = DIFFICULTIES[selectedEnemyDiffKey].ButtonText
 	local allyName = DIFFICULTIES[selectedAllyDiffKey].ButtonText
 	local cameraName = (cameraMode == "Full") and "всё поле" or "только я"
+	local selectedTeamSize = (matchMode == "3v3" and 3) or (matchMode == "2v2" and 2) or 1
+	local fieldInfo = FIELD_SIZES[selectedTeamSize]
+	local fieldText = "поле " .. tostring(fieldInfo.W) .. "×" .. tostring(fieldInfo.H) .. " (" .. fieldInfo.Label .. ")"
+	if modeCardNote then
+		modeCardNote.Text = "Выбрано: " .. fieldText
+	end
 	if UI.menuSummaryLabel then
 		if matchMode == "3v3" then
-			UI.menuSummaryLabel.Text = "3 на 3: ты + 2 напарника (" .. allyName .. ")  против трёх красных (" .. enemyName .. ")  •  " .. cameraName
+			UI.menuSummaryLabel.Text = "3×3  •  🔴 " .. enemyName .. "  •  🔵 " .. allyName .. "  •  " .. fieldText .. "  •  " .. cameraName
 		elseif matchMode == "2v2" then
-			UI.menuSummaryLabel.Text = "2 на 2: ты + напарник (" .. allyName .. ")  против двух красных (" .. enemyName .. ")  •  " .. cameraName
+			UI.menuSummaryLabel.Text = "2×2  •  🔴 " .. enemyName .. "  •  🔵 " .. allyName .. "  •  " .. fieldText .. "  •  " .. cameraName
 		else
-			UI.menuSummaryLabel.Text = "1 на 1: ты против красного бота (" .. enemyName .. ")  •  " .. cameraName
+			UI.menuSummaryLabel.Text = "1×1  •  🔴 " .. enemyName .. "  •  " .. fieldText .. "  •  " .. cameraName
 		end
 	end
 	if playButton then
@@ -1166,7 +1222,7 @@ makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1 • v1.7",
+	Text = "ЧАСТЬ 1 • v1.8",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -1186,7 +1242,7 @@ UI.gameFrame = create("Frame", {
 	Visible = false,
 	ZIndex = 1,
 }, UI.screenGui)
-addGradient(UI.gameFrame, Color3.fromRGB(9, 24, 18), Color3.fromRGB(5, 10, 20), 90)
+addGradient(UI.gameFrame, Color3.fromRGB(5, 25, 42), Color3.fromRGB(3, 7, 18), 35)
 
 do -- блоки ТВ-табло нужны как локалы только при создании подписей счёта
 -- ТВ-табло матча как в футбольной трансляции: командные блоки, таймер и LIVE
@@ -1532,8 +1588,8 @@ local function makeGoal(isLeft, color)
 	end
 	return goal
 end
-makeGoal(true, COL.Player)   -- твои ворота (синяя сетка) — защищай!
-makeGoal(false, COL.Bot)     -- ворота бота (красная сетка) — атакуй!
+UI.leftGoalFrame = makeGoal(true, COL.Player)   -- твои ворота (синяя сетка) — защищай!
+UI.rightGoalFrame = makeGoal(false, COL.Bot)     -- ворота бота (красная сетка) — атакуй!
 
 -- Штанги (белые точки по краям проёма)
 for _, p in ipairs(POSTS) do
@@ -1547,6 +1603,7 @@ for _, p in ipairs(POSTS) do
 	}, UI.fieldFrame)
 	addCorner(post, 1, 0)
 	addStroke(post, COL.Black, 1, 0.3)
+	table.insert(UI.postFrames, post) -- позиции штанг обновляются при смене размера поля
 end
 
 end -- разметка поля
@@ -2174,6 +2231,42 @@ function updateHUD()
 	end
 end
 
+-- Размер поля зависит от состава: 1×1 = база, 2×2 заметно шире, 3×3 — самое большое поле.
+-- Важно: радиусы мяча и фишек остаются прежними в виртуальных единицах. Поэтому
+-- относительно футболистов пространства действительно становится больше, а не просто
+-- растягивается картинка на экране.
+local function applyDynamicField()
+	local cfg = FIELD_SIZES[teamSize] or FIELD_SIZES[1]
+	FIELD_W = cfg.W
+	FIELD_H = cfg.H
+	FIELD_SCALE = cfg.W / 1000
+	GOAL_CENTER_Y = FIELD_H / 2
+	GOAL_Y1 = GOAL_CENTER_Y - cfg.GoalHalf
+	GOAL_Y2 = GOAL_CENTER_Y + cfg.GoalHalf
+	CORNER_CUT = math.floor(72 * FIELD_SCALE + 0.5)
+	POSTS[1] = Vector2.new(0, GOAL_Y1)
+	POSTS[2] = Vector2.new(0, GOAL_Y2)
+	POSTS[3] = Vector2.new(FIELD_W, GOAL_Y1)
+	POSTS[4] = Vector2.new(FIELD_W, GOAL_Y2)
+	cameraCenter = Vector2.new(FIELD_W / 2, FIELD_H / 2)
+	local chipSize = fieldSizeToUI(PLAYER_R * 2, PLAYER_R * 2)
+	for _, chip in ipairs({ UI.playerChip, UI.botChip, UI.allyChip, UI.ally2Chip, UI.enemy2Chip, UI.enemy3Chip }) do
+		if chip then
+			chip.Size = chipSize
+		end
+	end
+	if UI.ballFrame then
+		UI.ballFrame.Size = fieldSizeToUI(BALL_R * 2, BALL_R * 2)
+	end
+	local goalSize = fieldSizeToUI(42, GOAL_Y2 - GOAL_Y1)
+	if UI.leftGoalFrame then UI.leftGoalFrame.Size = goalSize end
+	if UI.rightGoalFrame then UI.rightGoalFrame.Size = goalSize end
+	for i, frame in ipairs(UI.postFrames or {}) do
+		frame.Position = fieldPosToUI(POSTS[i])
+		frame.Size = fieldSizeToUI(16, 16)
+	end
+end
+
 local function cancelCharge()
 	isCharging = false
 	chargePower = 0
@@ -2199,19 +2292,19 @@ function resetKickoff(kickoffTeam)
 
 	local allyPos, ally2Pos, enemy2Pos, enemy3Pos
 	if kickoffTeam == "player" then
-		playerPos = Vector2.new(425, 300)
-		botPos = Vector2.new(790, 300)
-		allyPos = Vector2.new(245, 185)
-		ally2Pos = Vector2.new(190, 405)
-		enemy2Pos = Vector2.new(725, 420)
-		enemy3Pos = Vector2.new(810, 180)
+		playerPos = Vector2.new(FIELD_W * 0.425, FIELD_H * 0.500)
+		botPos = Vector2.new(FIELD_W * 0.790, FIELD_H * 0.500)
+		allyPos = Vector2.new(FIELD_W * 0.245, FIELD_H * 0.308)
+		ally2Pos = Vector2.new(FIELD_W * 0.190, FIELD_H * 0.675)
+		enemy2Pos = Vector2.new(FIELD_W * 0.725, FIELD_H * 0.700)
+		enemy3Pos = Vector2.new(FIELD_W * 0.810, FIELD_H * 0.300)
 	else
-		playerPos = Vector2.new(210, 300)
-		botPos = Vector2.new(575, 300)
-		allyPos = Vector2.new(245, 415)
-		ally2Pos = Vector2.new(165, 200)
-		enemy2Pos = Vector2.new(755, 190)
-		enemy3Pos = Vector2.new(815, 405)
+		playerPos = Vector2.new(FIELD_W * 0.210, FIELD_H * 0.500)
+		botPos = Vector2.new(FIELD_W * 0.575, FIELD_H * 0.500)
+		allyPos = Vector2.new(FIELD_W * 0.245, FIELD_H * 0.692)
+		ally2Pos = Vector2.new(FIELD_W * 0.165, FIELD_H * 0.333)
+		enemy2Pos = Vector2.new(FIELD_W * 0.755, FIELD_H * 0.317)
+		enemy3Pos = Vector2.new(FIELD_W * 0.815, FIELD_H * 0.675)
 	end
 
 	local function resetExtra(actor, pos, facing, diff, active)
@@ -2259,6 +2352,10 @@ function resetKickoff(kickoffTeam)
 	BotAI.ballWallCheckTimer = 0
 	BotAI.ballWallLastPos = ballPos
 	BotAI.ballWallEscapeCooldown = 0
+	BotAI.ballClusterTimer = 0
+	BotAI.ballClusterCheckTimer = 0
+	BotAI.ballClusterLastPos = ballPos
+	BotAI.ballClusterEscapeCooldown = 0
 	BotAI.botStuckSampleTimer = 0
 	BotAI.botStuckScore = 0
 	BotAI.botLastSamplePos = botPos
@@ -2299,6 +2396,7 @@ function startMatch()
 	matchToken = matchToken + 1
 	teamSize = (matchMode == "3v3" and 3) or (matchMode == "2v2" and 2) or 1
 	isTeamMode = teamSize > 1
+	applyDynamicField() -- 2×2 и 3×3 получают реально большее виртуальное поле
 	currentDiff = DIFFICULTIES[selectedEnemyDiffKey]
 	currentAllyDiff = DIFFICULTIES[selectedAllyDiffKey]
 	playerScore, botScore = 0, 0
@@ -2309,11 +2407,11 @@ function startMatch()
 	cancelCharge()
 
 	if teamSize == 3 then
-		UI.diffBadgeLabel.Text = "3×3 • 🔴 " .. currentDiff.ButtonText .. " • 🔵 " .. currentAllyDiff.ButtonText
+		UI.diffBadgeLabel.Text = "3×3 • ПОЛЕ ×1.48 • 🔴 " .. currentDiff.ButtonText .. " • 🔵 " .. currentAllyDiff.ButtonText
 	elseif isTeamMode then
-		UI.diffBadgeLabel.Text = "2×2 • 🔴 " .. currentDiff.ButtonText .. " • 🔵 " .. currentAllyDiff.ButtonText
+		UI.diffBadgeLabel.Text = "2×2 • ПОЛЕ ×1.24 • 🔴 " .. currentDiff.ButtonText .. " • 🔵 " .. currentAllyDiff.ButtonText
 	else
-		UI.diffBadgeLabel.Text = "1×1 • 🔴 " .. currentDiff.ButtonText
+		UI.diffBadgeLabel.Text = "1×1 • ПОЛЕ ×1.00 • 🔴 " .. currentDiff.ButtonText
 	end
 	if UI.botNameLabel then
 		UI.botNameLabel.Text = isTeamMode and "БОТ 1" or "БОТ"
@@ -2399,28 +2497,79 @@ function finishMatch()
 	UI.finishOverlay.Visible = true
 end
 
--- Конфетти при голе 🎉
-local function spawnConfetti()
-	local colors = {
-		Color3.fromRGB(255, 214, 10), Color3.fromRGB(0, 200, 120),
-		Color3.fromRGB(0, 150, 255), Color3.fromRGB(255, 90, 160),
-		Color3.fromRGB(255, 255, 255),
-	}
-	for _ = 1, 26 do
-		local piece = create("Frame", {
-			Position = UDim2.new(rng:NextNumber(0, 1), 0, 0, -20),
-			Size = UDim2.new(0, rng:NextInteger(6, 12), 0, rng:NextInteger(8, 16)),
-			BackgroundColor3 = colors[rng:NextInteger(1, #colors)],
-			BorderSizePixel = 0,
-			ZIndex = 45,
-		}, UI.gameFrame)
-		local drift = rng:NextNumber(-0.06, 0.06)
-		TweenService:Create(piece, TweenInfo.new(rng:NextNumber(0.9, 1.4), Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-			Position = UDim2.new(clamp(piece.Position.X.Scale + drift, 0, 1), 0, 1, 30),
-			Rotation = rng:NextInteger(180, 540),
-		}):Play()
-		Debris:AddItem(piece, 1.6)
+-- Салют при голе: пять последовательных вспышек с разлетающимися искрами.
+-- Эффект рисуется обычными GUI-кружками поверх поля, поэтому не требует картинок,
+-- ParticleEmitter-ов на 3D-карте и не мешает повтору/следующему розыгрышу.
+local function spawnGoalFireworks(scorer)
+	local palette
+	if scorer == "player" then
+		palette = {
+			Color3.fromRGB(65, 190, 255), Color3.fromRGB(0, 110, 255),
+			Color3.fromRGB(255, 214, 10), Color3.fromRGB(255, 255, 255),
+			Color3.fromRGB(80, 255, 190),
+		}
+	else
+		palette = {
+			Color3.fromRGB(255, 75, 65), Color3.fromRGB(255, 145, 35),
+			Color3.fromRGB(255, 214, 10), Color3.fromRGB(255, 255, 255),
+			Color3.fromRGB(255, 90, 180),
+		}
 	end
+	task.spawn(function()
+		for burst = 1, 5 do
+			if not UI.gameFrame or not UI.gameFrame.Visible then
+				return
+			end
+			if state ~= "Goal" and state ~= "Replay" and state ~= "Finished" then
+				return
+			end
+			local cx = rng:NextNumber(0.16, 0.84)
+			local cy = rng:NextNumber(0.15, 0.42)
+			local burstColor = palette[((burst - 1) % #palette) + 1]
+			local flash = create("Frame", {
+				Name = "FireworkFlash",
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromScale(cx, cy),
+				Size = UDim2.fromOffset(14, 14),
+				BackgroundColor3 = burstColor,
+				BackgroundTransparency = 0.15,
+				BorderSizePixel = 0,
+				ZIndex = 45,
+			}, UI.gameFrame)
+			addCorner(flash, 1, 0)
+			TweenService:Create(flash, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Size = UDim2.fromOffset(78, 78),
+				BackgroundTransparency = 1,
+			}):Play()
+			Debris:AddItem(flash, 0.5)
+			for i = 1, 18 do
+				local angle = ((i - 1) / 18) * math.pi * 2 + rng:NextNumber(-0.10, 0.10)
+				local radius = rng:NextNumber(48, 124)
+				local sparkSize = rng:NextInteger(4, 7)
+				local spark = create("Frame", {
+					Name = "FireworkSpark",
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale(cx, cy),
+					Size = UDim2.fromOffset(sparkSize, sparkSize),
+					BackgroundColor3 = palette[rng:NextInteger(1, #palette)],
+					BackgroundTransparency = 0.02,
+					BorderSizePixel = 0,
+					ZIndex = 46,
+				}, UI.gameFrame)
+				addCorner(spark, 1, 0)
+				local target = UDim2.new(cx, math.cos(angle) * radius, cy, math.sin(angle) * radius * 0.78 + radius * 0.20)
+				TweenService:Create(spark, TweenInfo.new(rng:NextNumber(0.72, 1.05), Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+					Position = target,
+					Size = UDim2.fromOffset(1, 1),
+					BackgroundTransparency = 1,
+				}):Play()
+				Debris:AddItem(spark, 1.15)
+			end
+			if burst < 5 then
+				task.wait(0.17)
+			end
+		end
+	end)
 end
 
 -- Запись последних секунд матча для замедленного повтора.
@@ -2584,10 +2733,8 @@ function onGoal(scorer) -- scorer: "player" (синие) или "Bot" (крас�
 	UI.goalBanner.Visible = true
 	UI.goalBannerScale.Scale = 0.4
 	TweenService:Create(UI.goalBannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
-	playSfx(SFX.Applause, (scorer == "player") and 0.26 or 0.15, 1, 3)
-	if scorer == "player" then
-		spawnConfetti()
-	end
+	playSfx(SFX.Goal, 0.42, 1, 6) -- 132952369664787 при любом голе
+	spawnGoalFireworks(scorer)
 
 	local my = matchToken
 	task.delay(0.8, function()
@@ -2622,7 +2769,7 @@ end
 -- Медленная нелинейная сила ИГРОКА: начало шкалы очень мягкое.
 -- Короткий клик даёт короткий пас, а настоящий выстрел надо честно держать.
 local function getEffectivePlayerPower(rawPower)
-	return math.pow(clamp(rawPower, 0, 1), 1.35)
+	return math.pow(clamp(rawPower, 0, 1), 1.28)
 end
 
 -- Реалистичный ответ мяча на удар:
@@ -2633,8 +2780,8 @@ local function applyRealisticKick(dir, targetNormalSpeed)
 	local tangentVel = ballVel - dir * oldNormalSpeed
 	local outgoingNormal = math.max(targetNormalSpeed, oldNormalSpeed * 0.38)
 	ballVel = dir * outgoingNormal + tangentVel * 0.38
-	if ballVel.Magnitude > 1120 then
-		ballVel = unit2(ballVel) * 1120
+	if ballVel.Magnitude > 1120 * FIELD_SCALE then
+		ballVel = unit2(ballVel) * (1120 * FIELD_SCALE)
 	end
 end
 
@@ -2666,14 +2813,14 @@ local function kickBallForActor(actor, power01)
 	ballPos = actor.Pos + dir * (PLAYER_R + BALL_R)
 	local p = clamp(power01, 0, 1)
 	local d = actor.Diff or DIFFICULTIES.Medium
-	local speed = 230 + p * d.KickPower + math.max(0, actor.Vel:Dot(dir)) * 0.30
-	applyRealisticKick(dir, math.min(speed, 1120))
+	local speed = (230 + p * d.KickPower) * FIELD_SCALE + math.max(0, actor.Vel:Dot(dir)) * 0.30
+	applyRealisticKick(dir, math.min(speed, 1120 * FIELD_SCALE))
 	if actor.Team == "Blue" then
 		shotsPlayer = shotsPlayer + 1
 	else
 		shotsBot = shotsBot + 1
 	end
-	playSfx(SFX.Kick, 0.05 + p * 0.12, 0.75 + p * 0.25)
+	playSfx(SFX.Kick, 0.18 + p * 0.18, 0.95 + p * 0.10)
 	pulseBall()
 	return true
 end
@@ -2696,16 +2843,16 @@ local function kickBall(isBot, power01)
 	local speed
 	local approachFactor
 	if isBot then
-		speed = 240 + p * currentDiff.KickPower
+		speed = (240 + p * currentDiff.KickPower) * FIELD_SCALE
 		approachFactor = 0.35
 	else
 		local effective = getEffectivePlayerPower(p)
-		speed = 150 + effective * 850
+		speed = (150 + effective * 850) * FIELD_SCALE
 		approachFactor = 0.08 + effective * 0.22
 	end
 	-- Только скорость фишки ВДОЛЬ линии контакта усиливает удар; боковая скорость его не уводит.
 	local approachSpeed = math.max(0, chipVel:Dot(dir))
-	speed = math.min(speed + approachSpeed * approachFactor, 1120)
+	speed = math.min(speed + approachSpeed * approachFactor, 1120 * FIELD_SCALE)
 	applyRealisticKick(dir, speed)
 	-- Никакого рывка/отдачи персонажа на ЛКМ нет: двигается только мяч.
 
@@ -2714,7 +2861,7 @@ local function kickBall(isBot, power01)
 	else
 		shotsPlayer = shotsPlayer + 1
 	end
-	playSfx(SFX.Kick, 0.05 + p * 0.12, 0.75 + p * 0.25)
+	playSfx(SFX.Kick, 0.18 + p * 0.18, 0.95 + p * 0.10)
 	pulseBall()
 	return true
 end
@@ -2764,7 +2911,7 @@ local function botStep(dt)
 			toCenter = Vector2.new(1, 0)
 		end
 		local _, wallInward = getNearestWall(fromPos)
-		BotAI.botRecoveryPoint = clampBotTarget(fromPos + wallInward * 145 + toCenter * 50)
+		BotAI.botRecoveryPoint = clampBotTarget(fromPos + wallInward * (145 * FIELD_SCALE) + toCenter * (50 * FIELD_SCALE))
 		BotAI.botTargetPos = BotAI.botRecoveryPoint
 		BotAI.botTargetIsBall = false
 		BotAI.botCornerTimer = 0
@@ -2775,7 +2922,7 @@ local function botStep(dt)
 	-- Если мяч почти стоит у ЛЮБОГО борта, а бот его подпирает, бот обязан отойти.
 	local stuckBallDist = (ballPos - botPos).Magnitude
 	local ballAtWall = getWallBallInfo(ballPos)
-	if ballAtWall and ballVel.Magnitude < 70 and stuckBallDist < 125 then
+	if ballAtWall and ballVel.Magnitude < 70 * FIELD_SCALE and stuckBallDist < 125 then
 		BotAI.botCornerTimer = BotAI.botCornerTimer + dt
 	else
 		BotAI.botCornerTimer = math.max(0, BotAI.botCornerTimer - dt * 2)
@@ -2793,11 +2940,11 @@ local function botStep(dt)
 		local botMoved = (botPos - BotAI.botLastSamplePos).Magnitude
 		local ballMoved = (ballPos - BotAI.botLastBallSamplePos).Magnitude
 		local wantsToMove = (BotAI.botTargetPos - botPos).Magnitude > 18
-		local wallBallSlow = ballAtWall and not pursuingWallBall and ballMoved < 11 and stuckBallDist < 145
+		local wallBallSlow = ballAtWall and not pursuingWallBall and ballMoved < 11 * FIELD_SCALE and stuckBallDist < 145
 		local botNearWall = getNearestWall(botPos) <= PLAYER_R + 10
-		local pressedToWall = botNearWall and wantsToMove and botMoved < 14
+		local pressedToWall = botNearWall and wantsToMove and botMoved < 14 * FIELD_SCALE
 		if BotAI.botRecoveryTimer <= 0 and not pursuingWallBall
-			and ((wantsToMove and botMoved < 12) or wallBallSlow or pressedToWall) then
+			and ((wantsToMove and botMoved < 12 * FIELD_SCALE) or wallBallSlow or pressedToWall) then
 			BotAI.botStuckScore = BotAI.botStuckScore + 1
 		else
 			BotAI.botStuckScore = math.max(0, BotAI.botStuckScore - 1)
@@ -2816,7 +2963,7 @@ local function botStep(dt)
 
 		-- Предсказание перехвата: где мяч окажется, пока бот до него добежит
 		local distToBall = (ballPos - botPos).Magnitude
-		local reachTime = clamp(distToBall / math.max(d.Speed, 1), 0, 0.85)
+		local reachTime = clamp(distToBall / math.max(d.Speed * FIELD_SCALE, 1), 0, 0.85)
 		local predicted = ballPos + ballVel * reachTime * ((0.25 + d.Predict) * 0.78)
 		predicted = clampToField(predicted, BALL_R)
 
@@ -2836,8 +2983,8 @@ local function botStep(dt)
 				end
 			end
 		end
-		local botETA = botDist / math.max(d.Speed, 1)
-		local playerETA = playerDist / SETTINGS.PLAYER_SPRINT
+		local botETA = botDist / math.max(d.Speed * FIELD_SCALE, 1)
+		local playerETA = playerDist / (SETTINGS.PLAYER_SPRINT * FIELD_SCALE)
 		local canWinRace = botETA <= playerETA + (-0.12 + d.Aggression * 0.55)
 
 		local playerHasBall = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + 50
@@ -2855,27 +3002,27 @@ local function botStep(dt)
 		end
 		local blueHasBall = playerHasBall or allyHasBall
 		local looseBall = not blueHasBall and not botHasBall and not enemy2HasBall
-		local ballThreat = (ballPos.X > 720 and ballVel.X > 110)
-			or (ballPos.X > 850 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 175)
+		local ballThreat = (ballPos.X > 720 * FIELD_SCALE and ballVel.X > 110 * FIELD_SCALE)
+			or (ballPos.X > 850 * FIELD_SCALE and math.abs(ballPos.Y - GOAL_CENTER_Y) < 175 * FIELD_SCALE)
 
 		-- Линия прессинга: сложный бот встречает игрока очень глубоко.
 		-- Проигрывает или мало времени — прессингует ещё выше.
-		local pressLine = 470 - d.Aggression * 320
+		local pressLine = (470 - d.Aggression * 320) * FIELD_SCALE
 		if botScore < playerScore then
-			pressLine = pressLine - 110
+			pressLine = pressLine - 110 * FIELD_SCALE
 		end
 		if overtime or (timeLeft < 35 and botScore <= playerScore) then
-			pressLine = pressLine - 80
+			pressLine = pressLine - 80 * FIELD_SCALE
 		end
 
 		if ballThreat then
 			BotAI.botMode = "Defend"
 		elseif botHasBall or BotAI.botCommitTimer > 0 or canWinRace
 			or predicted.X >= pressLine
-			or (looseBall and predicted.X >= pressLine - 110)
+			or (looseBall and predicted.X >= pressLine - 110 * FIELD_SCALE)
 			or BotAI.ballIdleTimer > 1.2 then
 			BotAI.botMode = "Attack"
-		elseif playerHasBall and predicted.X >= 260 then
+		elseif playerHasBall and predicted.X >= 260 * FIELD_SCALE then
 			BotAI.botMode = "Challenge"
 		else
 			BotAI.botMode = "Defend"
@@ -2897,15 +3044,15 @@ local function botStep(dt)
 		local attackTarget
 		if isInCornerZone(predicted, 140) then
 			-- Сначала вытащить мяч из угла в открытую зону, атака уже потом
-			attackTarget = Vector2.new((predicted.X < FIELD_W / 2) and 300 or 700, (predicted.Y < FIELD_H / 2) and 215 or 385)
-		elseif ballPos.X > 820 then
-			attackTarget = Vector2.new(330, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
-		elseif predicted.X < d.ShootX then
+			attackTarget = Vector2.new((predicted.X < FIELD_W / 2) and 300 * FIELD_SCALE or 700 * FIELD_SCALE, (predicted.Y < FIELD_H / 2) and 215 * FIELD_SCALE or 385 * FIELD_SCALE)
+		elseif ballPos.X > 820 * FIELD_SCALE then
+			attackTarget = Vector2.new(330 * FIELD_SCALE, (playerPos.Y < GOAL_CENTER_Y) and 490 * FIELD_SCALE or 110 * FIELD_SCALE)
+		elseif predicted.X < d.ShootX * FIELD_SCALE then
 			local cornerY = (playerPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
 			attackTarget = Vector2.new(0, cornerY)
 		else
 			local laneY = predicted.Y * 0.70 + GOAL_CENTER_Y * 0.30 + ((playerPos.Y < predicted.Y) and 38 or -38)
-			attackTarget = Vector2.new(predicted.X - 320, clamp(laneY, 70, FIELD_H - 70))
+			attackTarget = Vector2.new(predicted.X - 320 * FIELD_SCALE, clamp(laneY, 70 * FIELD_SCALE, FIELD_H - 70 * FIELD_SCALE))
 		end
 		local shotDir = unit2(attackTarget - predicted)
 		local approachPoint = predicted - shotDir * (PLAYER_R + BALL_R + 8)
@@ -2943,8 +3090,8 @@ local function botStep(dt)
 				-- Редкая настоящая оборона — и та высокой линией, а не стоя в воротах.
 				local goalPos = Vector2.new(FIELD_W, GOAL_CENTER_Y)
 				local dirToBall = unit2(ballPos - goalPos)
-				local defPos = goalPos + dirToBall * 315
-				BotAI.botTargetPos = Vector2.new(clamp(defPos.X, 540, 925), clamp(defPos.Y, 85, FIELD_H - 85))
+				local defPos = goalPos + dirToBall * (315 * FIELD_SCALE)
+				BotAI.botTargetPos = Vector2.new(clamp(defPos.X, 540 * FIELD_SCALE, 925 * FIELD_SCALE), clamp(defPos.Y, 85 * FIELD_SCALE, FIELD_H - 85 * FIELD_SCALE))
 				BotAI.botTargetIsBall = false
 			end
 		end
@@ -2954,14 +3101,14 @@ local function botStep(dt)
 		end
 
 		if BotAI.botMode == "Support" then
-			local supportX = clamp(predicted.X - 215, 150, 735)
-			local openLaneY = (predicted.Y < GOAL_CENTER_Y) and 425 or 175
-			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75, FIELD_H - 75)
+			local supportX = clamp(predicted.X - 215 * FIELD_SCALE, 150 * FIELD_SCALE, 735 * FIELD_SCALE)
+			local openLaneY = (predicted.Y < GOAL_CENTER_Y) and 425 * FIELD_SCALE or 175 * FIELD_SCALE
+			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75 * FIELD_SCALE, FIELD_H - 75 * FIELD_SCALE)
 			BotAI.botTargetPos = Vector2.new(supportX, supportY)
 			if nearestRedExtraPos then
-				BotAI.botTargetPos = separateBotTarget(BotAI.botTargetPos, nearestRedExtraPos, 90)
+				BotAI.botTargetPos = separateBotTarget(BotAI.botTargetPos, nearestRedExtraPos, 104)
 			end
-			BotAI.botTargetPos = separateBotTarget(BotAI.botTargetPos, ballPos, 82)
+			BotAI.botTargetPos = separateBotTarget(BotAI.botTargetPos, ballPos, 108)
 			BotAI.botTargetIsBall = false
 		end
 	end
@@ -2976,21 +3123,21 @@ local function botStep(dt)
 	-- Движение бота: тот же физический подход, что у игрока.
 	local toTarget = BotAI.botTargetPos - botPos
 	local targetDist = toTarget.Magnitude
-	local speedNow = d.Speed
+	local speedNow = d.Speed * FIELD_SCALE
 	if targetDist < 105 then
 		speedNow = speedNow * clamp(targetDist / 105, 0.22, 1)
 	end
 	local ballDistNow = (ballPos - botPos).Magnitude
 	if (BotAI.botMode == "Attack" or BotAI.botMode == "Challenge") and ballDistNow < 135 and not BotAI.botTargetIsBall then
 		-- Рядом с мячом бот контролирует скорость, чтобы не пролетать мяч насквозь
-		speedNow = math.min(speedNow, math.max(105, d.Speed * 0.76))
+		speedNow = math.min(speedNow, math.max(105 * FIELD_SCALE, d.Speed * FIELD_SCALE * 0.76))
 	end
 	local desired = Vector2.new(0, 0)
 	if targetDist > 4 then
 		desired = unit2(toTarget) * speedNow
 	end
 	desired = limitBotVelocityAtWall(botPos, desired, BotAI.botTargetIsBall)
-	local botAccel = d.Accel or 600
+	local botAccel = (d.Accel or 600) * FIELD_SCALE
 	if desired.Magnitude < 1 then
 		botAccel = botAccel * 1.15
 	end
@@ -3006,13 +3153,13 @@ local function botStep(dt)
 		local aim, power
 		if isInCornerZone(ballPos, 140) then
 			-- Не добиваем мяч в угол: цель только открытая зона внутри поля
-			aim = Vector2.new((ballPos.X < FIELD_W / 2) and 300 or 700, (ballPos.Y < FIELD_H / 2) and 215 or 385)
+			aim = Vector2.new((ballPos.X < FIELD_W / 2) and 300 * FIELD_SCALE or 700 * FIELD_SCALE, (ballPos.Y < FIELD_H / 2) and 215 * FIELD_SCALE or 385 * FIELD_SCALE)
 			power = 0.62
-		elseif ballPos.X > 820 then
+		elseif ballPos.X > 820 * FIELD_SCALE then
 			-- Опасно у своих ворот — вынос на фланг, подальше от игрока
-			aim = Vector2.new(300, (playerPos.Y < GOAL_CENTER_Y) and 490 or 110)
+			aim = Vector2.new(300 * FIELD_SCALE, (playerPos.Y < GOAL_CENTER_Y) and 490 * FIELD_SCALE or 110 * FIELD_SCALE)
 			power = 0.76
-		elseif ballPos.X < d.ShootX then
+		elseif ballPos.X < d.ShootX * FIELD_SCALE then
 			-- Удар по воротам: в угол, дальний от игрока
 			local cornerY = (playerPos.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
 			aim = Vector2.new(0, cornerY)
@@ -3020,7 +3167,7 @@ local function botStep(dt)
 		else
 			-- Атакующее ведение: толкаем мяч к воротам игрока и ближе к центру
 			local laneY = ballPos.Y * 0.70 + GOAL_CENTER_Y * 0.30 + ((playerPos.Y < ballPos.Y) and 38 or -38)
-			aim = Vector2.new(ballPos.X - 320, clamp(laneY, 70, FIELD_H - 70))
+			aim = Vector2.new(ballPos.X - 320 * FIELD_SCALE, clamp(laneY, 70 * FIELD_SCALE, FIELD_H - 70 * FIELD_SCALE))
 			power = 0.50
 		end
 
@@ -3040,7 +3187,7 @@ local function botStep(dt)
 		local desiredDir = unit2(aim - ballPos)
 		local contactDirNow = unit2(ballPos - botPos)
 		local alignmentNow = contactDirNow:Dot(desiredDir)
-		local emergency = ballPos.X > 845 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180
+		local emergency = ballPos.X > 845 * FIELD_SCALE and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180 * FIELD_SCALE
 		local minAlignment = clamp(0.68 - d.AimError * 0.026, 0.02, 0.52) -- сложный бот ждёт более точный заход за мяч
 		if isInCornerZone(ballPos, 140) then
 			minAlignment = math.max(minAlignment, 0.45)
@@ -3056,7 +3203,7 @@ local function botStep(dt)
 			if kickBall(true, power) then
 				BotAI.botKickCooldown = d.KickCooldown * rng:NextNumber(0.85, 1.15)
 				-- После ведения/выноса бот продолжает атаку за мячом
-				BotAI.botCommitTimer = math.max(BotAI.botCommitTimer, (ballPos.X > 820) and 1.7 or 2.3)
+				BotAI.botCommitTimer = math.max(BotAI.botCommitTimer, (ballPos.X > 820 * FIELD_SCALE) and 1.7 or 2.3)
 				BotAI.botMode = "Attack"
 			end
 		else
@@ -3130,20 +3277,20 @@ local function chooseExtraActorAim(actor, fromPos)
 	end
 
 	if isInCornerZone(fromPos, 140) then
-		return Vector2.new((fromPos.X < FIELD_W / 2) and 300 or 700,
-			(fromPos.Y < FIELD_H / 2) and 215 or 385), 0.62
+		return Vector2.new((fromPos.X < FIELD_W / 2) and 300 * FIELD_SCALE or 700 * FIELD_SCALE,
+			(fromPos.Y < FIELD_H / 2) and 215 * FIELD_SCALE or 385 * FIELD_SCALE), 0.62
 	end
 
-	local dangerAtOwnGoal = (isBlue and fromPos.X < 190) or ((not isBlue) and fromPos.X > 810)
+	local dangerAtOwnGoal = (isBlue and fromPos.X < 190 * FIELD_SCALE) or ((not isBlue) and fromPos.X > 810 * FIELD_SCALE)
 	if dangerAtOwnGoal then
 		return Vector2.new(
-			clamp(fromPos.X + attackDirX * 350, 70, FIELD_W - 70),
-			(nearestOpponent.Y < GOAL_CENTER_Y) and 485 or 115
+			clamp(fromPos.X + attackDirX * (350 * FIELD_SCALE), 70 * FIELD_SCALE, FIELD_W - 70 * FIELD_SCALE),
+			(nearestOpponent.Y < GOAL_CENTER_Y) and 485 * FIELD_SCALE or 115 * FIELD_SCALE
 		), 0.76
 	end
 
-	local inShootZone = (isBlue and fromPos.X > FIELD_W - d.ShootX)
-		or ((not isBlue) and fromPos.X < d.ShootX)
+	local inShootZone = (isBlue and fromPos.X > FIELD_W - d.ShootX * FIELD_SCALE)
+		or ((not isBlue) and fromPos.X < d.ShootX * FIELD_SCALE)
 	if inShootZone then
 		local cornerY = (nearestOpponent.Y < GOAL_CENTER_Y) and (GOAL_Y2 - 18) or (GOAL_Y1 + 18)
 		return Vector2.new(attackGoalX, cornerY), 0.86
@@ -3161,8 +3308,8 @@ local function chooseExtraActorAim(actor, fromPos)
 	local laneY = fromPos.Y * 0.70 + GOAL_CENTER_Y * 0.30
 		+ ((nearestOpponent.Y < fromPos.Y) and 36 or -36)
 	return Vector2.new(
-		clamp(fromPos.X + attackDirX * 315, 60, FIELD_W - 60),
-		clamp(laneY, 70, FIELD_H - 70)
+		clamp(fromPos.X + attackDirX * (315 * FIELD_SCALE), 60 * FIELD_SCALE, FIELD_W - 60 * FIELD_SCALE),
+		clamp(laneY, 70 * FIELD_SCALE, FIELD_H - 70 * FIELD_SCALE)
 	), 0.50
 end
 
@@ -3188,7 +3335,7 @@ local function extraActorStep(actor, dt)
 			toCenter = Vector2.new(attackDirX, 0)
 		end
 		local _, wallInward = getNearestWall(fromPos)
-		actor.RecoveryPoint = clampBotTarget(fromPos + wallInward * 145 + toCenter * 50)
+		actor.RecoveryPoint = clampBotTarget(fromPos + wallInward * (145 * FIELD_SCALE) + toCenter * (50 * FIELD_SCALE))
 		actor.Target = actor.RecoveryPoint
 		actor.TargetIsBall = false
 		actor.CornerTimer = 0
@@ -3198,7 +3345,7 @@ local function extraActorStep(actor, dt)
 
 	local distToBallNow = (ballPos - actor.Pos).Magnitude
 	local ballAtWall = getWallBallInfo(ballPos)
-	if ballAtWall and ballVel.Magnitude < 70 and distToBallNow < 125 then
+	if ballAtWall and ballVel.Magnitude < 70 * FIELD_SCALE and distToBallNow < 125 then
 		actor.CornerTimer = actor.CornerTimer + dt
 	else
 		actor.CornerTimer = math.max(0, actor.CornerTimer - dt * 2)
@@ -3213,11 +3360,11 @@ local function extraActorStep(actor, dt)
 		local moved = (actor.Pos - actor.LastPos).Magnitude
 		local ballMoved = (ballPos - actor.LastBallPos).Magnitude
 		local wantsToMove = (actor.Target - actor.Pos).Magnitude > 18
-		local wallBallSlow = ballAtWall and not pursuingWallBall and ballMoved < 11 and distToBallNow < 145
+		local wallBallSlow = ballAtWall and not pursuingWallBall and ballMoved < 11 * FIELD_SCALE and distToBallNow < 145
 		local actorNearWall = getNearestWall(actor.Pos) <= PLAYER_R + 10
-		local pressedToWall = actorNearWall and wantsToMove and moved < 14
+		local pressedToWall = actorNearWall and wantsToMove and moved < 14 * FIELD_SCALE
 		if actor.Recovery <= 0 and not pursuingWallBall
-			and ((wantsToMove and moved < 12) or wallBallSlow or pressedToWall) then
+			and ((wantsToMove and moved < 12 * FIELD_SCALE) or wallBallSlow or pressedToWall) then
 			actor.StuckScore = actor.StuckScore + 1
 		else
 			actor.StuckScore = math.max(0, actor.StuckScore - 1)
@@ -3233,7 +3380,7 @@ local function extraActorStep(actor, dt)
 	if actor.Think <= 0 then
 		actor.Think = d.Reaction
 		local distToBall = (ballPos - actor.Pos).Magnitude
-		local reachTime = clamp(distToBall / math.max(d.Speed, 1), 0, 0.85)
+		local reachTime = clamp(distToBall / math.max(d.Speed * FIELD_SCALE, 1), 0, 0.85)
 		local predicted = clampToField(
 			ballPos + ballVel * reachTime * ((0.25 + d.Predict) * 0.78), BALL_R)
 		local teammatePos = getActorTeammate(actor)
@@ -3265,11 +3412,11 @@ local function extraActorStep(actor, dt)
 		local looseBall = not actorHasBall and not teammateHasBall and not opponentHasBall
 		local threatToOwnGoal
 		if isBlue then
-			threatToOwnGoal = (ballPos.X < 300 and ballVel.X < -110)
-				or (ballPos.X < 170 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 190)
+			threatToOwnGoal = (ballPos.X < 300 * FIELD_SCALE and ballVel.X < -110 * FIELD_SCALE)
+				or (ballPos.X < 170 * FIELD_SCALE and math.abs(ballPos.Y - GOAL_CENTER_Y) < 190 * FIELD_SCALE)
 		else
-			threatToOwnGoal = (ballPos.X > 700 and ballVel.X > 110)
-				or (ballPos.X > 830 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 190)
+			threatToOwnGoal = (ballPos.X > 700 * FIELD_SCALE and ballVel.X > 110 * FIELD_SCALE)
+				or (ballPos.X > 830 * FIELD_SCALE and math.abs(ballPos.Y - GOAL_CENTER_Y) < 190 * FIELD_SCALE)
 		end
 
 		local wallBallNow = getWallBallInfo(predicted)
@@ -3306,29 +3453,29 @@ local function extraActorStep(actor, dt)
 			end
 		elseif actor.Mode == "Cover" then
 			local ownGoal = Vector2.new(isBlue and 0 or FIELD_W, GOAL_CENTER_Y)
-			local coverPos = ownGoal + unit2(ballPos - ownGoal) * 285
+			local coverPos = ownGoal + unit2(ballPos - ownGoal) * (285 * FIELD_SCALE)
 			if (actor.Priority or 1) >= 2 then
-				coverPos = coverPos + Vector2.new(-attackDirX * 55, (ballPos.Y < GOAL_CENTER_Y) and 58 or -58)
+				coverPos = coverPos + Vector2.new(-attackDirX * (55 * FIELD_SCALE), (ballPos.Y < GOAL_CENTER_Y) and 58 * FIELD_SCALE or -58 * FIELD_SCALE)
 			end
 			if isBlue then
-				actor.Target = Vector2.new(clamp(coverPos.X, 90, 470), clamp(coverPos.Y, 85, FIELD_H - 85))
+				actor.Target = Vector2.new(clamp(coverPos.X, 90 * FIELD_SCALE, 470 * FIELD_SCALE), clamp(coverPos.Y, 85 * FIELD_SCALE, FIELD_H - 85 * FIELD_SCALE))
 			else
-				actor.Target = Vector2.new(clamp(coverPos.X, 530, 910), clamp(coverPos.Y, 85, FIELD_H - 85))
+				actor.Target = Vector2.new(clamp(coverPos.X, 530 * FIELD_SCALE, 910 * FIELD_SCALE), clamp(coverPos.Y, 85 * FIELD_SCALE, FIELD_H - 85 * FIELD_SCALE))
 			end
 		else
 			local supportX
 			if teammateHasBall then
-				supportX = isBlue and clamp(ballPos.X + 225, 270, 850) or clamp(ballPos.X - 225, 150, 730)
+				supportX = isBlue and clamp(ballPos.X + 225 * FIELD_SCALE, 270 * FIELD_SCALE, 850 * FIELD_SCALE) or clamp(ballPos.X - 225 * FIELD_SCALE, 150 * FIELD_SCALE, 730 * FIELD_SCALE)
 			else
-				supportX = isBlue and clamp(predicted.X + 135, 180, 760) or clamp(predicted.X - 135, 240, 820)
+				supportX = isBlue and clamp(predicted.X + 135 * FIELD_SCALE, 180 * FIELD_SCALE, 760 * FIELD_SCALE) or clamp(predicted.X - 135 * FIELD_SCALE, 240 * FIELD_SCALE, 820 * FIELD_SCALE)
 			end
-			local openLaneY = (ballPos.Y < GOAL_CENTER_Y) and 425 or 175
-			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75, FIELD_H - 75)
+			local openLaneY = (ballPos.Y < GOAL_CENTER_Y) and 425 * FIELD_SCALE or 175 * FIELD_SCALE
+			local supportY = clamp(predicted.Y * 0.35 + openLaneY * 0.65, 75 * FIELD_SCALE, FIELD_H - 75 * FIELD_SCALE)
 			if (actor.Priority or 1) >= 2 then
 				-- Второй напарник в 3×3 держит другую линию и чуть глубже страхует отскок.
-				supportX = clamp(supportX - attackDirX * 105, 90, FIELD_W - 90)
-				local secondLaneY = (ballPos.Y < GOAL_CENTER_Y) and 175 or 425
-				supportY = clamp(predicted.Y * 0.50 + secondLaneY * 0.50, 75, FIELD_H - 75)
+				supportX = clamp(supportX - attackDirX * (105 * FIELD_SCALE), 90 * FIELD_SCALE, FIELD_W - 90 * FIELD_SCALE)
+				local secondLaneY = (ballPos.Y < GOAL_CENTER_Y) and 175 * FIELD_SCALE or 425 * FIELD_SCALE
+				supportY = clamp(predicted.Y * 0.50 + secondLaneY * 0.50, 75 * FIELD_SCALE, FIELD_H - 75 * FIELD_SCALE)
 			end
 			actor.Target = Vector2.new(supportX, supportY)
 			actor.TargetIsBall = false
@@ -3336,15 +3483,15 @@ local function extraActorStep(actor, dt)
 
 		-- Не толпимся в одной точке с партнёрами, но и не прячемся далеко от мяча.
 		if not actor.TargetIsBall then
-			actor.Target = separateBotTarget(actor.Target, primaryTeammatePos, 90)
+			actor.Target = separateBotTarget(actor.Target, primaryTeammatePos, 104)
 			for _, other in ipairs(extraActors) do
 				if other ~= actor and other.Active and other.Team == actor.Team then
-					actor.Target = separateBotTarget(actor.Target, other.Pos, 90)
+					actor.Target = separateBotTarget(actor.Target, other.Pos, 104)
 				end
 			end
 		end
 		if actor.Mode ~= "Chase" then
-			actor.Target = separateBotTarget(actor.Target, ballPos, 82)
+			actor.Target = separateBotTarget(actor.Target, ballPos, 108)
 			actor.TargetIsBall = false
 		end
 	end
@@ -3358,19 +3505,19 @@ local function extraActorStep(actor, dt)
 
 	local toTarget = actor.Target - actor.Pos
 	local targetDist = toTarget.Magnitude
-	local speedNow = d.Speed
+	local speedNow = d.Speed * FIELD_SCALE
 	if targetDist < 105 then
 		speedNow = speedNow * clamp(targetDist / 105, 0.22, 1)
 	end
 	if actor.Mode == "Chase" and distToBallNow < 135 and not actor.TargetIsBall then
-		speedNow = math.min(speedNow, math.max(105, d.Speed * 0.76))
+		speedNow = math.min(speedNow, math.max(105 * FIELD_SCALE, d.Speed * FIELD_SCALE * 0.76))
 	end
 	local desired = Vector2.new(0, 0)
 	if targetDist > 4 then
 		desired = unit2(toTarget) * speedNow
 	end
 	desired = limitBotVelocityAtWall(actor.Pos, desired, actor.TargetIsBall)
-	local accel = d.Accel or 600
+	local accel = (d.Accel or 600) * FIELD_SCALE
 	if desired.Magnitude < 1 then
 		accel = accel * 1.15
 	end
@@ -3394,9 +3541,9 @@ local function extraActorStep(actor, dt)
 		local alignment = contactDir:Dot(desiredDir)
 		local emergency
 		if isBlue then
-			emergency = ballPos.X < 155 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180
+			emergency = ballPos.X < 155 * FIELD_SCALE and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180 * FIELD_SCALE
 		else
-			emergency = ballPos.X > 845 and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180
+			emergency = ballPos.X > 845 * FIELD_SCALE and math.abs(ballPos.Y - GOAL_CENTER_Y) < 180 * FIELD_SCALE
 		end
 		local minAlignment = clamp(0.68 - d.AimError * 0.026, 0.02, 0.52)
 		if isInCornerZone(ballPos, 140) then
@@ -3434,7 +3581,7 @@ local function playerStep(dt)
 		if toTouch.Magnitude > 12 then
 			move = unit2(toTouch)
 			-- У пальца не дёргаемся: чем ближе цель, тем мягче скорость
-			touchSpeedScale = clamp(toTouch.Magnitude / 95, 0.25, 1)
+			touchSpeedScale = clamp(toTouch.Magnitude / (95 * FIELD_SCALE), 0.25, 1)
 		end
 	elseif not UserInputService:GetFocusedTextBox() then
 		if keysDown[Enum.KeyCode.W] or keysDown[Enum.KeyCode.Up] then move = move + Vector2.new(0, -1) end
@@ -3443,9 +3590,9 @@ local function playerStep(dt)
 		if keysDown[Enum.KeyCode.D] or keysDown[Enum.KeyCode.Right] then move = move + Vector2.new(1, 0) end
 	end
 
-	local speed = SETTINGS.PLAYER_SPEED
+	local speed = SETTINGS.PLAYER_SPEED * FIELD_SCALE
 	if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] then
-		speed = SETTINGS.PLAYER_SPRINT
+		speed = SETTINGS.PLAYER_SPRINT * FIELD_SCALE
 	end
 	if isCharging then
 		speed = speed * 0.72 -- пока держишь удар, идёшь спокойнее и точнее подходишь к мячу
@@ -3458,11 +3605,11 @@ local function playerStep(dt)
 	end
 
 	-- Разгон ~0.35 сек, остановка с коротким скольжением, разворот с инерцией
-	local acceleration = 820
+	local acceleration = 820 * FIELD_SCALE
 	if desired.Magnitude < 1 then
-		acceleration = 980
-	elseif playerVel.Magnitude > 20 and playerVel:Dot(desired) < 0 then
-		acceleration = 900
+		acceleration = 980 * FIELD_SCALE
+	elseif playerVel.Magnitude > 20 * FIELD_SCALE and playerVel:Dot(desired) < 0 then
+		acceleration = 900 * FIELD_SCALE
 	end
 	playerVel = approachVelocity(playerVel, desired, acceleration, dt)
 	if desired.Magnitude < 1 and playerVel.Magnitude < 5 then
@@ -3502,7 +3649,7 @@ local function resolvePair(aPos, aVel, bPos, bVel)
 end
 
 local function resolveChipChip()
-	for _ = 1, 2 do
+	for _ = 1, 4 do
 		playerPos, playerVel, botPos, botVel = resolvePair(playerPos, playerVel, botPos, botVel)
 		for _, actor in ipairs(extraActors) do
 			if actor.Active then
@@ -3527,29 +3674,301 @@ local function resolveChipChip()
 	end
 end
 
--- Толчок мяча фишкой при ведении (дриблинг)
+local function inGoalMouth(y)
+	return y > GOAL_Y1 and y < GOAL_Y2
+end
+
+-- Во время позиционного решателя мяч нельзя случайно увести за борт.
+-- В проёме ворот X не зажимаем: гол должен честно засчитываться линией ниже.
+local function keepBallInsideForSolver()
+	if inGoalMouth(ballPos.Y) then
+		ballPos = Vector2.new(ballPos.X, clamp(ballPos.Y, BALL_R, FIELD_H - BALL_R))
+	else
+		ballPos = clampToField(ballPos, BALL_R)
+	end
+end
+
+-- Минимальное расстояние от точки до центра любой активной фишки.
+local function getBallChipClearance(pos)
+	local best = math.min((pos - playerPos).Magnitude, (pos - botPos).Magnitude)
+	for _, actor in ipairs(extraActors) do
+		if actor.Active then
+			best = math.min(best, (pos - actor.Pos).Magnitude)
+		end
+	end
+	return best
+end
+
+-- Аварийный поиск ближайшей точки, где мяч гарантированно не пересекается
+-- ни с одной фишкой. Используется только если обычное выталкивание уперлось
+-- в стену/другие фишки или медленный мяч зажат давкой из нескольких кругов.
+local function findFreeBallPosition(origin, preferredDir)
+	local bestPos = nil
+	local bestScore = -math.huge
+	local minClearance = PLAYER_R + BALL_R + 1.25
+	local function consider(rawPos)
+		local candidate = clampToField(rawPos, BALL_R + 1)
+		local clearance = getBallChipClearance(candidate)
+		if clearance < minClearance then
+			return
+		end
+		local wallClearance = math.min(candidate.X, FIELD_W - candidate.X, candidate.Y, FIELD_H - candidate.Y)
+		local offset = candidate - origin
+		local travel = offset.Magnitude
+		local directionScore = 0
+		if preferredDir and preferredDir.Magnitude > 0.01 and travel > 0.01 then
+			directionScore = (offset / travel):Dot(unit2(preferredDir)) * 34
+		end
+		-- Важнее ближайшая безопасная точка, а не далёкий «идеальный» телепорт:
+		-- мяч должен выскочить из давки рядом с борьбой, а не прыгнуть через полполя.
+		local score = math.min(clearance, 78) * 0.82
+			+ math.min(wallClearance, 90) * 0.28
+			- travel * 1.05
+			+ directionScore * 0.55
+		if score > bestScore then
+			bestScore = score
+			bestPos = candidate
+		end
+	end
+	for _, radius in ipairs({ 46, 60, 76, 94, 118, 150, 190 }) do
+		for i = 0, 23 do
+			local angle = (i / 24) * math.pi * 2
+			consider(origin + Vector2.new(math.cos(angle), math.sin(angle)) * radius)
+		end
+	end
+	consider(origin:Lerp(Vector2.new(FIELD_W / 2, FIELD_H / 2), 0.32))
+	return bestPos
+end
+
+-- Один контакт мяч↔фишка. ВНИМАНИЕ: возвращает обновлённые pos/vel фишки.
+-- Старый вариант двигал только мяч точно на окружность одной фишки; следующая
+-- фишка могла тут же вернуть его внутрь первой. Теперь коррекция делится:
+-- мяч получает большую часть сдвига, а фишка тоже физически уступает место.
 local function collideBallWithChip(chipPos, chipVel)
 	local diff = ballPos - chipPos
 	local dist = diff.Magnitude
 	local minDist = PLAYER_R + BALL_R
-	if dist > 0.001 and dist < minDist then
-		local n = diff / dist
-		ballPos = chipPos + n * minDist
-		local relativeVel = ballVel - chipVel
+	if dist >= minDist then
+		return chipPos, chipVel, false
+	end
+	local n
+	if dist > 0.001 then
+		n = diff / dist
+	else
+		-- Центры совпали: направление берём из относительного движения,
+		-- затем из движения фишки и только в конце — к центру поля.
+		n = unit2(ballVel - chipVel)
+		if n.Magnitude < 0.01 then
+			n = unit2(chipVel)
+		end
+		if n.Magnitude < 0.01 then
+			n = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - chipPos)
+		end
+		if n.Magnitude < 0.01 then
+			n = Vector2.new(1, 0)
+		end
+	end
+	local penetration = minDist - dist
+	ballPos = ballPos + n * (penetration * 0.74)
+	chipPos = chipPos - n * (penetration * 0.26)
+	chipPos, chipVel = applyFieldClamp(chipPos, chipVel, PLAYER_R)
+	keepBallInsideForSolver()
+	local relativeVel = ballVel - chipVel
+	local relativeNormal = relativeVel:Dot(n)
+	if relativeNormal < 0 then
+		local relativeTangent = relativeVel - n * relativeNormal
+		local chipNormalSpeed = chipVel:Dot(n)
+		local restitution = (chipNormalSpeed > 35 * FIELD_SCALE) and 0.16 or 0.38
+		ballVel = chipVel + relativeTangent * 0.88 - n * relativeNormal * restitution
+	end
+	return chipPos, chipVel, true
+end
+
+-- ГЛАВНАЯ ГАРАНТИЯ: после этой функции мяч не должен заканчивать шаг внутри
+-- ни одной фишки. Контакты решаются несколькими проходами сразу со всеми
+-- игроками, а не одним последовательным «поставил на окружность и забыл».
+local function resolveBallChipOverlaps()
+	local minDist = PLAYER_R + BALL_R
+	for _ = 1, 12 do
+		local anyHit = false
+		local hit
+		playerPos, playerVel, hit = collideBallWithChip(playerPos, playerVel)
+		anyHit = anyHit or hit
+		botPos, botVel, hit = collideBallWithChip(botPos, botVel)
+		anyHit = anyHit or hit
+		for _, actor in ipairs(extraActors) do
+			if actor.Active then
+				actor.Pos, actor.Vel, hit = collideBallWithChip(actor.Pos, actor.Vel)
+				anyHit = anyHit or hit
+			end
+		end
+		if not anyHit then
+			return true
+		end
+		resolveChipChip()
+		keepBallInsideForSolver()
+		if getBallChipClearance(ballPos) >= minDist - 0.05 then
+			return true
+		end
+	end
+	if getBallChipClearance(ballPos) < minDist - 0.05 then
+		local freePos = findFreeBallPosition(ballPos, Vector2.new(FIELD_W / 2, FIELD_H / 2) - ballPos)
+		if freePos then
+			ballPos = freePos
+			keepBallInsideForSolver()
+		end
+	end
+	return getBallChipClearance(ballPos) >= minDist - 0.05
+end
+
+-- Swept circle-vs-circle: мяч движется не «телепортом в конечную точку», а
+-- отрезком. Находим самое раннее касание с фишкой на этом отрезке, поэтому
+-- быстрый мяч не пролетает сквозь круг даже при низком FPS/большом поле.
+local function moveBallSafely(sdt)
+	local minDist = PLAYER_R + BALL_R
+	local timeLeft = sdt
+	for _ = 1, 4 do
+		local chips = {
+			{ p = playerPos, v = playerVel },
+			{ p = botPos, v = botVel },
+		}
+		for _, actor in ipairs(extraActors) do
+			if actor.Active then
+				table.insert(chips, { p = actor.Pos, v = actor.Vel })
+			end
+		end
+		local move = ballVel * timeLeft
+		if move.Magnitude < 0.0001 then
+			return
+		end
+		local earliest = 2
+		local hitChip = nil
+		for _, chip in ipairs(chips) do
+			local rel = ballPos - chip.p
+			local a = move:Dot(move)
+			if a > 0.000001 then
+				local b = 2 * rel:Dot(move)
+				local c = rel:Dot(rel) - minDist * minDist
+				local t = nil
+				if c <= 0 then
+					local n0 = unit2(rel)
+					if n0.Magnitude > 0.01 and (ballVel - chip.v):Dot(n0) < -0.01 then
+						t = 0
+					end
+				else
+					local discriminant = b * b - 4 * a * c
+					if discriminant >= 0 then
+						t = (-b - math.sqrt(discriminant)) / (2 * a)
+					end
+				end
+				if t and t >= 0 and t <= 1 and t < earliest then
+					earliest = t
+					hitChip = chip
+				end
+			end
+		end
+		if not hitChip then
+			ballPos = ballPos + move
+			return
+		end
+		ballPos = ballPos + move * earliest
+		local n = unit2(ballPos - hitChip.p)
+		if n.Magnitude < 0.01 then
+			n = unit2(ballVel - hitChip.v)
+		end
+		if n.Magnitude < 0.01 then
+			n = Vector2.new(1, 0)
+		end
+		ballPos = hitChip.p + n * (minDist + 0.04)
+		keepBallInsideForSolver()
+		local relativeVel = ballVel - hitChip.v
 		local relativeNormal = relativeVel:Dot(n)
 		if relativeNormal < 0 then
 			local relativeTangent = relativeVel - n * relativeNormal
-			-- Быстрый мяч заметно отскакивает от стоячей фишки, а при обычном ведении
-			-- фишка не выстреливает им вперёд: отскок зависит от того, кто создал удар.
-			local chipNormalSpeed = chipVel:Dot(n)
-			local restitution = (chipNormalSpeed > 35) and 0.16 or 0.38
-			ballVel = chipVel + relativeTangent * 0.88 - n * relativeNormal * restitution
+			local chipNormalSpeed = hitChip.v:Dot(n)
+			local restitution = (chipNormalSpeed > 35 * FIELD_SCALE) and 0.16 or 0.38
+			ballVel = hitChip.v + relativeTangent * 0.88 - n * relativeNormal * restitution
+		end
+		resolveBallChipOverlaps()
+		timeLeft = timeLeft * (1 - earliest)
+		if timeLeft <= 0.00001 then
+			return
 		end
 	end
 end
 
-local function inGoalMouth(y)
-	return y > GOAL_Y1 and y < GOAL_Y2
+-- Медленный мяч, зажатый минимум двумя фишками и почти не двигающийся,
+-- физически выдавливается в свободную сторону. Это отдельный предохранитель
+-- именно для скриншота с БОТ 1 + БОТ 2 + напарник в одной точке.
+local function updateBallClusterEscape(dt)
+	BotAI.ballClusterEscapeCooldown = math.max(0, BotAI.ballClusterEscapeCooldown - dt)
+	local contactCount = 0
+	local normalSum = Vector2.new(0, 0)
+	local function considerChip(pos)
+		local diff = ballPos - pos
+		local dist = diff.Magnitude
+		if dist <= PLAYER_R + BALL_R + 24 then
+			contactCount = contactCount + 1
+			if dist > 0.01 then
+				normalSum = normalSum + diff / dist
+			end
+		end
+	end
+	considerChip(playerPos)
+	considerChip(botPos)
+	for _, actor in ipairs(extraActors) do
+		if actor.Active then
+			considerChip(actor.Pos)
+		end
+	end
+	local crowded = contactCount >= 2 and ballVel.Magnitude < 180 * FIELD_SCALE
+	if crowded then
+		BotAI.ballClusterCheckTimer = BotAI.ballClusterCheckTimer + dt
+		if BotAI.ballClusterCheckTimer >= 0.25 then
+			local moved = (ballPos - BotAI.ballClusterLastPos).Magnitude
+			if moved < 15 then
+				BotAI.ballClusterTimer = BotAI.ballClusterTimer + BotAI.ballClusterCheckTimer
+			else
+				BotAI.ballClusterTimer = math.max(0, BotAI.ballClusterTimer - BotAI.ballClusterCheckTimer)
+			end
+			BotAI.ballClusterLastPos = ballPos
+			BotAI.ballClusterCheckTimer = 0
+		end
+	else
+		BotAI.ballClusterTimer = math.max(0, BotAI.ballClusterTimer - dt * 2)
+		BotAI.ballClusterCheckTimer = 0
+		BotAI.ballClusterLastPos = ballPos
+	end
+	local neededTime = (contactCount >= 3) and 0.48 or 0.72
+	if crowded and BotAI.ballClusterEscapeCooldown <= 0 and BotAI.ballClusterTimer >= neededTime then
+		local preferred = normalSum
+		if preferred.Magnitude < 0.25 then
+			preferred = Vector2.new(FIELD_W / 2, FIELD_H / 2) - ballPos
+		end
+		if ballVel.Magnitude > 25 * FIELD_SCALE then
+			preferred = preferred + unit2(ballVel) * 0.45
+		end
+		local oldPos = ballPos
+		local freePos = findFreeBallPosition(oldPos, preferred)
+		if freePos then
+			local escapeDir = unit2(freePos - oldPos)
+			if escapeDir.Magnitude < 0.01 then
+				escapeDir = unit2(preferred)
+			end
+			if escapeDir.Magnitude < 0.01 then
+				escapeDir = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - oldPos)
+			end
+			ballPos = freePos
+			ballVel = escapeDir * (520 * FIELD_SCALE)
+			BotAI.ballClusterTimer = 0
+			BotAI.ballClusterCheckTimer = 0
+			BotAI.ballClusterLastPos = ballPos
+			BotAI.ballClusterEscapeCooldown = 1.5
+			BotAI.ballWallTimer = 0
+			BotAI.ballIdleTimer = 0
+			playSfx(SFX.Bounce, 0.05, 0.95)
+		end
+	end
 end
 
 local function bounceBallOffNormal(n, restitution, tangentKeep)
@@ -3565,7 +3984,7 @@ end
 local function collideBallCorner(sx, sy)
 	local dx = (sx > 0) and ballPos.X or (FIELD_W - ballPos.X)
 	local dy = (sy > 0) and ballPos.Y or (FIELD_H - ballPos.Y)
-	if dx > 190 or dy > 190 then
+	if dx > 190 * FIELD_SCALE or dy > 190 * FIELD_SCALE then
 		return
 	end
 	local need = CORNER_CUT + BALL_R * math.sqrt(2)
@@ -3576,31 +3995,31 @@ local function collideBallCorner(sx, sy)
 	local inward = Vector2.new(sx, sy) / math.sqrt(2)
 	ballPos = ballPos + inward * ((need - sum) / math.sqrt(2))
 	local impactSpeed = bounceBallOffNormal(inward, 0.64, 0.92)
-	if impactSpeed > 90 then
+	if impactSpeed > 90 * FIELD_SCALE then
 		playSfx(SFX.Bounce, 0.03, 1.1)
 	end
 end
 
 local function ballStep(dt)
-	-- Два подшага — быстрый мяч не пролетает сквозь фишки и штанги
-	for _ = 1, 2 do
-		local sdt = dt / 2
-		collideBallWithChip(playerPos, playerVel)
-		collideBallWithChip(botPos, botVel)
-		for _, actor in ipairs(extraActors) do
-			if actor.Active then collideBallWithChip(actor.Pos, actor.Vel) end
-		end
+	-- Сначала убираем перекрытия, созданные движением самих фишек в этом кадре,
+	-- затем проверяем давку и только потом двигаем мяч swept-отрезками.
+	resolveBallChipOverlaps()
+	updateBallClusterEscape(dt)
+	local steps = clamp(math.ceil((ballVel.Magnitude * dt) / 7), 4, 12)
+	for _ = 1, steps do
+		local sdt = dt / steps
+		resolveBallChipOverlaps()
 
 		-- Мёртвый мяч у борта: сначала лёгкое выкатывание, затем один заметный отскок.
 		-- Смотрим не только скорость, но и реальное перемещение: катящийся вдоль стены мяч не трогаем.
 		BotAI.ballWallEscapeCooldown = math.max(0, BotAI.ballWallEscapeCooldown - sdt)
 		local ballAtWall, wallDist, wallInward = getWallBallInfo(ballPos)
 		local touchingWall = ballAtWall and wallDist <= BALL_R + 9
-		if touchingWall and ballVel.Magnitude < 150 then
+		if touchingWall and ballVel.Magnitude < 150 * FIELD_SCALE then
 			BotAI.ballWallCheckTimer = BotAI.ballWallCheckTimer + sdt
 			if BotAI.ballWallCheckTimer >= 0.30 then
 				local movedNearWall = (ballPos - BotAI.ballWallLastPos).Magnitude
-				if movedNearWall < 16 then
+				if movedNearWall < 16 * FIELD_SCALE then
 					BotAI.ballWallTimer = BotAI.ballWallTimer + BotAI.ballWallCheckTimer
 				else
 					BotAI.ballWallTimer = math.max(0, BotAI.ballWallTimer - BotAI.ballWallCheckTimer * 1.5)
@@ -3625,7 +4044,7 @@ local function ballStep(dt)
 			local escapeDir = getDeadBallEscapeDirection(ballPos)
 			if escapeDir and escapeDir.Magnitude > 0.01 then
 				ballPos = clampToField(ballPos + escapeDir * 7, BALL_R)
-				ballVel = escapeDir * 455
+				ballVel = escapeDir * (455 * FIELD_SCALE)
 				BotAI.ballWallTimer = 0
 				BotAI.ballWallCheckTimer = 0
 				BotAI.ballWallLastPos = ballPos
@@ -3633,20 +4052,22 @@ local function ballStep(dt)
 				BotAI.ballIdleTimer = 0
 				playSfx(SFX.Bounce, 0.045, 0.92)
 			end
-		elseif isInCornerZone(ballPos, 115) and ballVel.Magnitude < 110 then
+		elseif isInCornerZone(ballPos, 115) and ballVel.Magnitude < 110 * FIELD_SCALE then
 			local inward = unit2(Vector2.new(FIELD_W / 2, FIELD_H / 2) - ballPos)
-			ballVel = ballVel + inward * (230 * sdt)
+			ballVel = ballVel + inward * (230 * FIELD_SCALE * sdt)
 		elseif touchingWall and BotAI.ballWallTimer > 0.35 then
-			ballVel = ballVel + wallInward * (285 * sdt)
+			ballVel = ballVel + wallInward * (285 * FIELD_SCALE * sdt)
 		end
 
-		ballPos = ballPos + ballVel * sdt
+		resolveBallChipOverlaps()
+		moveBallSafely(sdt)
+		resolveBallChipOverlaps()
 		ballVel = ballVel * math.pow(0.34, sdt) -- сильное трение: мяч тяжёлый и быстро останавливается
-		if ballVel.Magnitude < 10 then
+		if ballVel.Magnitude < 10 * FIELD_SCALE then
 			ballVel = Vector2.new(0, 0)
 		end
-		if ballVel.Magnitude > 1100 then
-			ballVel = unit2(ballVel) * 1100
+		if ballVel.Magnitude > 1100 * FIELD_SCALE then
+			ballVel = unit2(ballVel) * (1100 * FIELD_SCALE)
 		end
 
 		-- Штанги
@@ -3654,11 +4075,12 @@ local function ballStep(dt)
 			local diff = ballPos - post
 			local dist = diff.Magnitude
 			local minDist = BALL_R + 7
-			if dist > 0.001 and dist < minDist then
-				local n = diff / dist
+			if dist < minDist then
+				local n = (dist > 0.001) and (diff / dist) or unit2(ballVel)
+				if n.Magnitude < 0.01 then n = Vector2.new((post.X < FIELD_W / 2) and 1 or -1, 0) end
 				ballPos = post + n * minDist
 				local impactSpeed = bounceBallOffNormal(n, 0.68, 0.92)
-				if impactSpeed > 60 then
+				if impactSpeed > 60 * FIELD_SCALE then
 					playSfx(SFX.Bounce, 0.04, 1.15)
 				end
 			end
@@ -3678,6 +4100,8 @@ local function ballStep(dt)
 		collideBallCorner(-1, 1)
 		collideBallCorner(1, -1)
 		collideBallCorner(-1, -1)
+
+		resolveBallChipOverlaps()
 
 		-- Левые ворота (игрока) / левая стенка
 		if ballPos.X < BALL_R then
@@ -3703,7 +4127,9 @@ local function ballStep(dt)
 				ballVel = Vector2.new(-math.abs(ballVel.X) * 0.72, ballVel.Y * 0.94)
 			end
 		end
+		resolveBallChipOverlaps()
 	end
+	resolveBallChipOverlaps() -- финальная гарантия перед записью повтора и рендером кадра
 end
 
 local function playingStep(dt)
@@ -3726,7 +4152,7 @@ local function playingStep(dt)
 			break
 		end
 	end
-	if ballVel.Magnitude < 25
+	if ballVel.Magnitude < 25 * FIELD_SCALE
 		and (ballPos - playerPos).Magnitude > 120
 		and (ballPos - botPos).Magnitude > 120
 		and not extraNearBall then
@@ -3795,8 +4221,8 @@ local function updateFieldCamera(dt)
 		local visibleW = FIELD_W / zoom
 		local visibleH = FIELD_H / zoom
 		desired = Vector2.new(
-			clamp(desired.X, visibleW / 2 - 38, FIELD_W - visibleW / 2 + 38),
-			clamp(desired.Y, visibleH / 2 - 28, FIELD_H - visibleH / 2 + 28)
+			clamp(desired.X, visibleW / 2 - 38 * FIELD_SCALE, FIELD_W - visibleW / 2 + 38 * FIELD_SCALE),
+			clamp(desired.Y, visibleH / 2 - 28 * FIELD_SCALE, FIELD_H - visibleH / 2 + 28 * FIELD_SCALE)
 		)
 		if state == "Countdown" then
 			cameraCenter = desired
@@ -3932,7 +4358,7 @@ local function chargeStep(dt)
 	if not isCharging then
 		return
 	end
-	chargePower = clamp(chargePower + dt / SETTINGS.CHARGE_TIME, 0, 1) -- полная сила за 1.8 сек
+	chargePower = clamp(chargePower + dt / SETTINGS.CHARGE_TIME, 0, 1) -- полная сила примерно за 1.45 сек
 	local shownPower = getEffectivePlayerPower(chargePower) -- и сама шкала растёт мягко, особенно в начале
 	UI.powerBarFill.Size = UDim2.fromScale(shownPower, 1)
 	if UI.powerPercentLabel then
@@ -3958,7 +4384,7 @@ local function chargeStep(dt)
 	local effective = getEffectivePlayerPower(chargePower)
 	UI.aimLine.Position = fieldPosToUI(from)
 	UI.aimLine.Rotation = math.deg(math.atan(dir.Y, dir.X))
-	UI.aimLine.Size = UDim2.new((55 + effective * 125) / FIELD_W, 0, 0, 5)
+	UI.aimLine.Size = UDim2.new(((55 + effective * 125) * FIELD_SCALE) / FIELD_W, 0, 0, 5)
 	UI.aimLine.Visible = true
 end
 
@@ -4143,4 +4569,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.7 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
+print("[ROBALL] Часть 1 v1.8 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
