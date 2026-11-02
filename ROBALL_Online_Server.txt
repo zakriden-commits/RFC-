@@ -1,6 +1,6 @@
 --[[
 ================================================================================
-  ROBALL ONLINE SERVER v1.9 — серверная часть онлайн-комнат
+  ROBALL ONLINE SERVER v1.9.1 — серверная часть онлайн-комнат
 ================================================================================
 
   КУДА ВСТАВИТЬ:
@@ -20,6 +20,9 @@
     • ник и аватар создателя в списке серверов;
     • свободное подключение любого игрока, пока есть места;
     • автоматический старт, когда набрались 2 / 4 / 6 игроков;
+    • быстрый сетевой режим 30 Гц: движение — UnreliableRemoteEvent с Seq,
+      удар — отдельный надёжный RemoteEvent, снапшоты — с серверным временем
+      для компенсации возраста пакета на клиенте;
     • серверная физика фишек и мяча: клиент не может просто прислать гол,
       телепортировать мяч или задать выдуманное направление удара;
     • удар рассчитывается по физической линии ЦЕНТР ФИШКИ → ЦЕНТР МЯЧА;
@@ -52,7 +55,7 @@ ReplicatedStorage:SetAttribute("ROBALL_Online_Server_Running", true)
 -- Настройки онлайн-матча
 --------------------------------------------------------------------------------
 local MATCH_TIME = 120
-local SNAPSHOT_INTERVAL = 0.05 -- 20 снимков состояния в секунду
+local SNAPSHOT_INTERVAL = 1 / 30 -- 30 снимков состояния в секунду: меньше ожидание свежего кадра
 local CHIP_R = 27
 local BALL_R = 13
 local CORNER_CUT = 72
@@ -68,7 +71,7 @@ local WIN_GOAL_OPTIONS = {
 	[10] = true,
 }
 
--- Размеры и ворота должны совпадать с клиентом v1.9.
+-- Размеры и ворота должны совпадать с клиентом v1.9.1.
 local LAYOUTS = {
 	["1v1"] = { TeamSize = 1, MaxPlayers = 2, W = 1000, H = 600, Scale = 1.00, GoalHalf = 90, Label = "1×1" },
 	["2v2"] = { TeamSize = 2, MaxPlayers = 4, W = 1240, H = 744, Scale = 1.24, GoalHalf = 100, Label = "2×2" },
@@ -95,7 +98,8 @@ end
 
 local RoomRF = makeRemote("RemoteFunction", "RoomRF")
 local RoomUpdate = makeRemote("RemoteEvent", "RoomUpdate")
-local MatchInput = makeRemote("RemoteEvent", "MatchInput")
+local MatchInput = makeRemote("UnreliableRemoteEvent", "MatchInput") -- только свежий вектор движения
+local MatchKick = makeRemote("RemoteEvent", "MatchKick") -- удар нельзя терять: надёжный канал
 local MatchEvent = makeRemote("RemoteEvent", "MatchEvent")
 local MatchSnapshot = makeRemote("UnreliableRemoteEvent", "MatchSnapshot")
 
@@ -210,6 +214,7 @@ local function makeMember(player, slot, isHost)
 		Facing = (slot % 2 == 1) and 0 or math.pi,
 		KickCooldown = 0,
 		LastKickSeq = -1,
+		LastMoveSeq = -1,
 	}
 end
 
@@ -413,19 +418,21 @@ local function sendSnapshot(room, snap)
 	-- отправляем компактными массивами {X, Y, VX, VY, Facing}, а не словарями.
 	-- Seq нужен клиенту, чтобы игнорировать старый пакет, пришедший позже нового.
 	match.SnapshotSeq = (match.SnapshotSeq or 0) + 1
+	local isPlaying = room.Status == "Playing"
 	local players = {}
 	for _, member in ipairs(membersList(room)) do
 		players[member.Slot] = {
 			member.Pos.X,
 			member.Pos.Y,
-			member.Vel.X,
-			member.Vel.Y,
+			isPlaying and member.Vel.X or 0,
+			isPlaying and member.Vel.Y or 0,
 			member.Facing,
 		}
 	end
 
 	local data = {
 		Seq = match.SnapshotSeq,
+		ServerTime = workspace:GetServerTimeNow(),
 		State = room.Status,
 		Snap = snap == true,
 		TimeLeft = match.TimeLeft,
@@ -438,8 +445,8 @@ local function sendSnapshot(room, snap)
 		Ball = {
 			match.BallPos.X,
 			match.BallPos.Y,
-			match.BallVel.X,
-			match.BallVel.Y,
+			isPlaying and match.BallVel.X or 0,
+			isPlaying and match.BallVel.Y or 0,
 			match.BallRot,
 		},
 		Players = players,
@@ -1319,14 +1326,25 @@ end)
 --------------------------------------------------------------------------------
 -- Ввод игроков
 --------------------------------------------------------------------------------
-MatchInput.OnServerEvent:Connect(function(player, data)
+local function handleMatchInput(player, data)
 	if type(data) ~= "table" then return end
 
 	local room = roomByPlayer[player]
 	local member = findMember(room, player)
 	if not room or not member or not room.Match then return end
 
-	if isFiniteNumber(data.MoveX) and isFiniteNumber(data.MoveY) then
+	-- MatchInput теперь UnreliableRemoteEvent: пакеты могут прийти не по порядку.
+	-- Принимаем только Seq новее уже обработанного; удар ниже обрабатывается отдельно.
+	local acceptMove = true
+	if isFiniteNumber(data.Seq) then
+		local moveSeq = math.floor(data.Seq)
+		acceptMove = moveSeq > (member.LastMoveSeq or -1)
+		if acceptMove then
+			member.LastMoveSeq = moveSeq
+		end
+	end
+
+	if acceptMove and isFiniteNumber(data.MoveX) and isFiniteNumber(data.MoveY) then
 		local move = Vector2.new(
 			clamp(data.MoveX, -1, 1),
 			clamp(data.MoveY, -1, 1)
@@ -1337,10 +1355,10 @@ MatchInput.OnServerEvent:Connect(function(player, data)
 		member.Input.Move = move
 	end
 
-	if type(data.Sprint) == "boolean" then
+	if acceptMove and type(data.Sprint) == "boolean" then
 		member.Input.Sprint = data.Sprint
 	end
-	if type(data.Charging) == "boolean" then
+	if acceptMove and type(data.Charging) == "boolean" then
 		member.Input.Charging = data.Charging
 	end
 
@@ -1351,7 +1369,10 @@ MatchInput.OnServerEvent:Connect(function(player, data)
 			attemptKick(room, member, clamp(data.KickPower, 0, 1))
 		end
 	end
-end)
+end
+
+MatchInput.OnServerEvent:Connect(handleMatchInput)
+MatchKick.OnServerEvent:Connect(handleMatchInput)
 
 --------------------------------------------------------------------------------
 -- RemoteFunction комнат: Create / Join / Leave / List / Rematch

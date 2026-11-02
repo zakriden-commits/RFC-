@@ -1,9 +1,18 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.9 (ОФФЛАЙН + ОНЛАЙН-КОМНАТЫ)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.9.1 (НИЗКАЯ ЗАДЕРЖКА + МОБИЛЬНЫЙ ДЖОЙСТИК)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
 
-  ЧТО НОВОГО В 1.9:
+  ЧТО НОВОГО В 1.9.1:
+  • Переписан отклик онлайна: своя фишка предсказывается локально каждый кадр,
+    ввод и снапшоты идут 30 раз/сек, серверное время компенсирует возраст пакета,
+    а движение больше не ждёт медленного Lerp к прошлому серверному снимку
+  • На телефоне: большой аналоговый джойстик слева и круглая кнопка мяча справа.
+    Стик можно вести пальцем — наклон и скорость фишки следуют прямо за рукой;
+    сильное отклонение стика до края включает спринт
+  • Шкала силы удара заряжается в два раза быстрее: полная примерно за 0.73 сек
+
+  ЧТО НОВОГО БЫЛО В 1.9:
   • Рядом с обычным каталогом появился раздел «🌐 ОНЛАЙН»: список комнат текущего
     сервера Roblox, аватар и ник создателя, режим, счёт игроков и кнопка входа
   • Комнату можно создать на 1×1, 2×2 или 3×3 и выбрать, до скольки голов играем:
@@ -91,7 +100,7 @@
   • ИИ ботов: атака, поддержка партнёра, пасы, оборона, выносы и удары по углам
   • Матч до 3 голов, время матча — 2 минуты (ничья по времени = золотой гол)
   • Большое поле с видом «всё поле / только я», табло, пауза, конец матча, реванш
-  • Поддержка телефона: веди фишку пальцем по полю + кнопка «УДАР»
+  • Поддержка телефона: аналоговый джойстик слева + круглая кнопка мяча справа
 
 --------------------------------------------------------------------------------
   📥 КУДА ВСТАВЛЯТЬ (ДВА СКРИПТА — КЛИЕНТ + СЕРВЕР):
@@ -119,7 +128,7 @@
   Shift .................. спринт
   Пробел ................. в матче быстрый физический удар; в повторе — ПРОПУСТИТЬ повтор
   P или кнопка ⏸ ......... пауза
-  Телефон ................ веди пальцем по полю + кнопка «УДАР»
+  Телефон ................ левый джойстик пальцем + справа держи кнопку мяча для удара
 
   Синие ворота — СЛЕВА (защищай), красные ворота — СПРАВА (атакуй).
   Кто первым забьёт 3 гола — победитель. Матч длится 2:00.
@@ -171,7 +180,7 @@ local SETTINGS = {
 	PLAYER_SPRINT = 360,   -- максимальная скорость на Shift
 	REPLAY_DURATION = 7,   -- повтор гола на экране ровно 7 секунд
 	REPLAY_SOURCE = 3.5,   -- из них берём последние 3.5 сек игры и показываем в 2 раза медленнее
-	CHARGE_TIME = 1.45,    -- полная шкала удара: всё ещё контролируемо, но чуть быстрее прежнего
+	CHARGE_TIME = 0.725,   -- полная шкала удара: в два раза быстрее прежних 1.45 сек
 }
 
 --// Виртуальное поле (координаты игры, НЕ пиксели экрана) \\--
@@ -346,7 +355,10 @@ local Net = {
 	WinGoals = SETTINGS.WIN_GOALS,
 	StatusText = "Подключение к онлайн-серверу...",
 	InputTimer = 0,
+	InputSeq = 0,
 	LastInputKey = "",
+	LastSnapshotServerTime = 0,
+	SnapshotAge = 0,
 	KickSeq = 0,
 	Targets = nil,
 	SnapshotState = "Menu",
@@ -409,6 +421,9 @@ local UI = {
 	postFrames = {},
 	onlineModeButtons = {},
 	onlineGoalButtons = {},
+	joystickVector = Vector2.new(0, 0),
+	joystickActive = false,
+	joystickSprint = false,
 }
 
 --// Маленькие помощники \\--
@@ -1286,7 +1301,7 @@ makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1 • v1.9",
+	Text = "ЧАСТЬ 1 • v1.9.1",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -2563,7 +2578,7 @@ local controlsHintLabel = makeText(UI.gameFrame, {
 	BackgroundColor3 = Color3.fromRGB(7, 18, 30),
 	BackgroundTransparency = 0.22,
 	Text = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
-		and "📱 Палец по полю — движение • УДАР от фишки через мяч"
+		and "🕹️ Стик слева — движение • ⚽ справа — удар"
 		or "🎮 WASD — движение • ЛКМ — удар • Shift — спринт",
 	TextSize = 14,
 	TextScaled = true,
@@ -2573,6 +2588,10 @@ local controlsHintLabel = makeText(UI.gameFrame, {
 })
 addCorner(controlsHintLabel, 1, 0)
 addStroke(controlsHintLabel, COL.White, 1, 0.68)
+if UserInputService.TouchEnabled then
+	-- На телефоне нижние углы заняты джойстиком и кнопкой мяча: подсказку не кладём поверх них.
+	controlsHintLabel.Visible = false
+end
 
 end -- подсказка управления
 
@@ -2580,19 +2599,163 @@ end -- подсказка управления
 UI.kickButton = makeButton(UI.gameFrame, {
 	Name = "KickButton",
 	AnchorPoint = Vector2.new(1, 1),
-	Position = UDim2.fromScale(0.985, 0.985),
-	Size = UDim2.fromScale(0.115, 0.13),
-	BackgroundColor3 = COL.Bot,
+	Position = UDim2.new(1, -22, 1, -22),
+	Size = UDim2.fromOffset(112, 112),
+	BackgroundColor3 = Color3.fromRGB(248, 250, 255),
 	Text = "⚽\nУДАР",
+	TextColor3 = Color3.fromRGB(18, 24, 34),
 	Font = Enum.Font.GothamBlack,
-	TextSize = 20,
+	TextSize = 21,
 	TextScaled = true,
 	Visible = UserInputService.TouchEnabled,
-	ZIndex = 26,
+	ZIndex = 27,
 })
 addCorner(UI.kickButton, 1, 0)
-addStroke(UI.kickButton, COL.White, 3, 0.2)
-addGradient(UI.kickButton, Color3.fromRGB(255, 105, 95), Color3.fromRGB(196, 24, 32), 90)
+addStroke(UI.kickButton, Color3.fromRGB(12, 16, 24), 3, 0.12)
+addGradient(UI.kickButton, Color3.fromRGB(255, 255, 255), Color3.fromRGB(150, 165, 185), 90)
+
+do -- мобильный аналоговый джойстик: один раз строится, дальше живёт в UI
+-- Слева внизу. Палец ведёт ручку, вектор джойстика сразу становится направлением
+-- и силой движения персонажа; отклонение почти до края включает спринт.
+UI.joystickBase = create("Frame", {
+	Name = "MobileJoystick",
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 22, 1, -22),
+	Size = UDim2.fromOffset(154, 154),
+	BackgroundColor3 = Color3.fromRGB(7, 18, 30),
+	BackgroundTransparency = 0.24,
+	BorderSizePixel = 0,
+	Visible = UserInputService.TouchEnabled,
+	ZIndex = 26,
+}, UI.gameFrame)
+addCorner(UI.joystickBase, 1, 0)
+addStroke(UI.joystickBase, COL.White, 2, 0.32)
+addGradient(UI.joystickBase, Color3.fromRGB(35, 75, 110), Color3.fromRGB(5, 12, 24), 90)
+local joystickRing = create("Frame", {
+	Name = "JoystickRing",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(0.74, 0.74),
+	BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+	BackgroundTransparency = 0.88,
+	BorderSizePixel = 0,
+	ZIndex = 26,
+}, UI.joystickBase)
+addCorner(joystickRing, 1, 0)
+addStroke(joystickRing, COL.White, 1, 0.45)
+makeText(UI.joystickBase, {
+	Name = "JoystickLabel",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.new(0.5, 0, 0, -4),
+	Size = UDim2.fromScale(1, 0.14),
+	Text = "ДВИЖЕНИЕ",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 12,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(190, 225, 255),
+	TextStrokeColor3 = COL.Black,
+	TextStrokeTransparency = 0.45,
+	ZIndex = 27,
+})
+UI.joystickKnob = create("Frame", {
+	Name = "JoystickKnob",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(64, 64),
+	BackgroundColor3 = Color3.fromRGB(0, 170, 255),
+	BorderSizePixel = 0,
+	ZIndex = 28,
+}, UI.joystickBase)
+addCorner(UI.joystickKnob, 1, 0)
+addStroke(UI.joystickKnob, COL.White, 2, 0.15)
+addGradient(UI.joystickKnob, Color3.fromRGB(255, 255, 255), Color3.fromRGB(65, 140, 255), 90)
+makeText(UI.joystickKnob, {
+	Name = "JoystickArrows",
+	Size = UDim2.fromScale(1, 1),
+	Text = "↔",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 27,
+	TextScaled = true,
+	TextColor3 = COL.White,
+	TextStrokeColor3 = COL.Black,
+	TextStrokeTransparency = 0.40,
+	ZIndex = 29,
+})
+
+local function joystickCenterAndRadius()
+	local base = UI.joystickBase
+	local size = base.AbsoluteSize
+	local center = base.AbsolutePosition + size / 2
+	local radius = math.max(28, math.min(size.X, size.Y) * 0.29) -- ручка целиком остаётся внутри базы
+	return center, radius, size
+end
+
+UI.resetJoystick = function()
+	UI.joystickVector = Vector2.new(0, 0)
+	UI.joystickActive = false
+	UI.joystickSprint = false
+	UI.joystickInput = nil
+	if UI.joystickKnob then
+		UI.joystickKnob.Position = UDim2.fromScale(0.5, 0.5)
+	end
+end
+
+UI.updateJoystickFromScreen = function(screenPos)
+	if not UI.joystickBase then return false end
+	local center, radius = joystickCenterAndRadius()
+	local offset = screenPos - center
+	if offset.Magnitude > radius then
+		offset = unit2(offset) * radius
+	end
+	if UI.joystickKnob then
+		UI.joystickKnob.Position = UDim2.new(0.5, offset.X, 0.5, offset.Y)
+	end
+	local normalized = (radius > 0) and (offset / radius) or Vector2.new(0, 0)
+	local magnitude = normalized.Magnitude
+	local deadZone = 0.10
+	if magnitude <= deadZone then
+		UI.joystickVector = Vector2.new(0, 0)
+	else
+		local aliveMagnitude = clamp((magnitude - deadZone) / (1 - deadZone), 0, 1)
+		UI.joystickVector = unit2(normalized) * aliveMagnitude
+	end
+	UI.joystickSprint = magnitude >= 0.96
+	return true
+end
+
+UI.isJoystickScreenPos = function(screenPos)
+	if not UI.joystickBase then return false end
+	local center, _, size = joystickCenterAndRadius()
+	local captureRadius = math.min(size.X, size.Y) * 0.72
+	return (screenPos - center).Magnitude <= captureRadius
+end
+
+UI.beginJoystick = function(input, screenPos)
+	if not UI.joystickBase or UI.joystickActive then return false end
+	UI.joystickBase.Visible = true
+	if UI.kickButton then UI.kickButton.Visible = true end
+	if not UI.isJoystickScreenPos(screenPos) then return false end
+	UI.joystickInput = input
+	UI.joystickActive = true
+	UI.updateJoystickFromScreen(screenPos)
+	return true
+end
+
+UI.moveJoystick = function(input, screenPos)
+	if UI.joystickActive and UI.joystickInput == input then
+		return UI.updateJoystickFromScreen(screenPos)
+	end
+	return false
+end
+
+UI.endJoystick = function(input)
+	if UI.joystickInput == input then
+		UI.resetJoystick()
+		return true
+	end
+	return false
+end
+end -- мобильный джойстик
 
 -- Обратный отсчёт 3-2-1
 UI.countdownLabel = makeText(UI.gameFrame, {
@@ -4276,7 +4439,11 @@ end
 local function playerStep(dt)
 	local move = Vector2.new(0, 0)
 	local touchSpeedScale = 1
-	if touchActive then
+	if UI.joystickActive and UI.joystickVector and UI.joystickVector.Magnitude > 0.01 then
+		-- Аналоговый стик: направление задаёт ручка, а величина отклонения — скорость.
+		move = unit2(UI.joystickVector)
+		touchSpeedScale = clamp(UI.joystickVector.Magnitude, 0, 1)
+	elseif touchActive then
 		local toTouch = touchFieldPos - playerPos
 		if toTouch.Magnitude > 12 then
 			move = unit2(toTouch)
@@ -4291,7 +4458,7 @@ local function playerStep(dt)
 	end
 
 	local speed = SETTINGS.PLAYER_SPEED * FIELD_SCALE
-	if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] then
+	if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] or UI.joystickSprint then
 		speed = SETTINGS.PLAYER_SPRINT * FIELD_SCALE
 	end
 	if isCharging then
@@ -5059,7 +5226,7 @@ local function chargeStep(dt)
 	if not isCharging then
 		return
 	end
-	chargePower = clamp(chargePower + dt / SETTINGS.CHARGE_TIME, 0, 1) -- полная сила примерно за 1.45 сек
+	chargePower = clamp(chargePower + dt / SETTINGS.CHARGE_TIME, 0, 1) -- полная сила примерно за 0.73 сек
 	local shownPower = getEffectivePlayerPower(chargePower) -- и сама шкала растёт мягко, особенно в начале
 	UI.powerBarFill.Size = UDim2.fromScale(shownPower, 1)
 	if UI.powerPercentLabel then
@@ -5095,7 +5262,7 @@ end
 --================================================================================
 do -- сетевые Remote-ы и обработчики живут в Net, а не десятками top-level local
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local roomRF, roomUpdateRemote, matchInputRemote, matchEventRemote, matchSnapshotRemote
+local roomRF, roomUpdateRemote, matchInputRemote, matchKickRemote, matchEventRemote, matchSnapshotRemote
 
 local function setNetStatus(text)
 	if UI.setOnlineStatus then
@@ -5199,9 +5366,10 @@ Net.Rematch = function()
 end
 
 Net.SendKick = function(power)
-	if not Net.InMatch or not matchInputRemote then return end
+	if not Net.InMatch or (not matchKickRemote and not matchInputRemote) then return end
 	Net.KickSeq = Net.KickSeq + 1
-	matchInputRemote:FireServer({
+	-- Удар идёт отдельным надёжным RemoteEvent и не ждёт очередь пакетов движения.
+	(matchKickRemote or matchInputRemote):FireServer({
 		KickPower = clamp(power or 0, 0, 1),
 		KickSeq = Net.KickSeq,
 	})
@@ -5327,6 +5495,17 @@ local function applySnapshot(data)
 		if data.Seq <= (Net.LastSnapshotSeq or 0) then return end
 		Net.LastSnapshotSeq = data.Seq
 	end
+
+	-- Сервер присылает своё время снимка. Компенсируем возраст пакета
+	-- экстраполяцией скоростей: клиент рисует не прошлую картинку, а оценку
+	-- текущего серверного положения. Вне Playing сервер позы не интегрирует,
+	-- поэтому там экстраполяцию не включаем.
+	local serverNow = workspace:GetServerTimeNow()
+	local serverTime = tonumber(data.ServerTime) or serverNow
+	local snapshotAge = (data.State == "Playing") and clamp(serverNow - serverTime, 0, 0.22) or 0
+	Net.LastSnapshotServerTime = serverTime
+	Net.SnapshotAge = snapshotAge
+
 	Net.SnapshotState = data.State or Net.SnapshotState
 	if type(data.TimeLeft) == "number" then timeLeft = data.TimeLeft end
 	if type(data.BlueScore) == "number" then playerScore = math.floor(data.BlueScore) end
@@ -5335,36 +5514,74 @@ local function applySnapshot(data)
 	if type(data.RedShots) == "number" then shotsBot = math.floor(data.RedShots) end
 	overtime = data.Overtime == true
 	if type(data.CountdownEndsAt) == "number" then Net.CountdownEndsAt = data.CountdownEndsAt end
+
 	local targets = Net.Targets or { Slots = {} }
 	targets.Slots = targets.Slots or {}
 	if type(data.Ball) == "table" then
 		-- Компактный формат сервера: {X, Y, VX, VY, Rot}.
-		targets.Ball = Vector2.new(tonumber(data.Ball[1] or data.Ball.X) or ballPos.X, tonumber(data.Ball[2] or data.Ball.Y) or ballPos.Y)
-		targets.BallVel = Vector2.new(tonumber(data.Ball[3] or data.Ball.VX) or 0, tonumber(data.Ball[4] or data.Ball.VY) or 0)
+		local rawBallPos = Vector2.new(tonumber(data.Ball[1] or data.Ball.X) or ballPos.X, tonumber(data.Ball[2] or data.Ball.Y) or ballPos.Y)
+		local rawBallVel = Vector2.new(tonumber(data.Ball[3] or data.Ball.VX) or 0, tonumber(data.Ball[4] or data.Ball.VY) or 0)
+		local ballTravel = snapshotAge
+		if snapshotAge > 0 then
+			-- Интеграл скорости с серверным трением 0.34^dt, а не грубый рывок Vel * age.
+			ballTravel = (1 - math.pow(0.34, snapshotAge)) / 1.0788
+		end
+		targets.Ball = rawBallPos + rawBallVel * ballTravel
+		targets.BallVel = rawBallVel * math.pow(0.34, snapshotAge)
 		targets.BallRot = tonumber(data.Ball[5] or data.Ball.Rot)
 	end
+
+	local localAuth = nil
 	if type(data.Players) == "table" then
 		for slot, info in pairs(data.Players) do
 			local slotNumber = tonumber(slot)
 			if slotNumber and type(info) == "table" then
 				-- Компактный формат сервера: {X, Y, VX, VY, Facing}.
-				targets.Slots[slotNumber] = {
-					Pos = Vector2.new(tonumber(info[1] or info.X) or 0, tonumber(info[2] or info.Y) or 0),
-					Vel = Vector2.new(tonumber(info[3] or info.VX) or 0, tonumber(info[4] or info.VY) or 0),
+				local rawPos = Vector2.new(tonumber(info[1] or info.X) or 0, tonumber(info[2] or info.Y) or 0)
+				local rawVel = Vector2.new(tonumber(info[3] or info.VX) or 0, tonumber(info[4] or info.VY) or 0)
+				local targetPos = rawPos + rawVel * snapshotAge
+				targetPos = clampToField(targetPos, PLAYER_R)
+				local target = {
+					Pos = targetPos,
+					Vel = rawVel,
 					Facing = tonumber(info[5] or info.F),
 				}
+				targets.Slots[slotNumber] = target
+				if slotNumber == Net.LocalSlot then
+					localAuth = target
+				end
 			end
 		end
 	end
 	Net.Targets = targets
+
 	local shouldSnap = data.Snap == true or not Net.HasSnapshot
-	if not shouldSnap and targets.Ball and (targets.Ball - ballPos).Magnitude > 240 * FIELD_SCALE then
+	if not shouldSnap and targets.Ball and (targets.Ball - ballPos).Magnitude > 220 * FIELD_SCALE then
 		shouldSnap = true
 	end
 	Net.HasSnapshot = true
 	if shouldSnap then
 		snapToTargets()
+	elseif localAuth then
+		-- Реконсиляция предсказания: позицию своей фишки НЕ заменяем прошлым
+		-- серверным кадром и скорость НЕ сбрасываем каждый кадр (это и давало
+		-- ощущение огромного пинга). Небольшую ошибку оставляем предсказанию,
+		-- среднюю мягко подтягиваем, огромную (столкновение/телепорт) чиним сразу.
+		local currentPos, currentVel = Net.GetLocalState()
+		local positionError = localAuth.Pos - currentPos
+		local dist = positionError.Magnitude
+		if dist > 135 * FIELD_SCALE then
+			setSlotState(Net.LocalSlot, localAuth.Pos, localAuth.Vel, localAuth.Facing)
+		elseif dist > 4 then
+			local correctionAlpha = clamp(0.16 + dist / (430 * FIELD_SCALE), 0.16, 0.42)
+			local correctedVel = currentVel
+			if dist > 22 * FIELD_SCALE then
+				correctedVel = currentVel:Lerp(localAuth.Vel, 0.35)
+			end
+			setSlotState(Net.LocalSlot, currentPos + positionError * correctionAlpha, correctedVel, nil)
+		end
 	end
+
 	if data.State == "Countdown" then
 		state = "Countdown"
 		UI.countdownLabel.Visible = true
@@ -5451,33 +5668,14 @@ end
 
 Net.Step = function(dt)
 	if not Net.InMatch then return end
-	local targets = Net.Targets
-	if targets then
-		local slotAlpha = 1 - math.exp(-18 * dt)
-		local localAlpha = 1 - math.exp(-8 * dt)
-		local ballAlpha = 1 - math.exp(-26 * dt)
-		for slot, info in pairs(targets.Slots or {}) do
-			-- Своя фишка ниже получит локальное предсказание движения, поэтому
-			-- к серверному снимку её тянем мягче: управление ощущается без задержки,
-			-- а сервер всё равно остаётся финальным источником правды.
-			lerpSlot(slot, info, (slot == Net.LocalSlot) and localAlpha or slotAlpha)
-		end
-		if targets.Ball then
-			ballPos = ballPos:Lerp(targets.Ball, ballAlpha)
-			ballVel = targets.BallVel or ballVel
-		end
-	end
-	if state == "Countdown" then
-		local remain = Net.CountdownEndsAt - workspace:GetServerTimeNow()
-		UI.countdownLabel.Visible = true
-		UI.countdownLabel.Text = (remain > 0.15) and tostring(math.ceil(remain)) or "⚽ ИГРА!"
-	elseif state == "Playing" then
-		UI.countdownLabel.Visible = false
-	end
-	-- Управление отправляем серверу максимум 20 раз/сек или сразу при изменении.
+
+	-- 1) Сначала читаем свежий ввод именно этого кадра. Своя фишка ниже
+	-- сдвинется сразу, не дожидаясь путешествия пакета на сервер и обратно.
 	local move = Vector2.new(0, 0)
 	if state == "Playing" then
-		if touchActive then
+		if UI.joystickActive and UI.joystickVector and UI.joystickVector.Magnitude > 0.01 then
+			move = UI.joystickVector
+		elseif touchActive then
 			local localPos = Net.GetLocalState()
 			local toTouch = touchFieldPos - localPos
 			if toTouch.Magnitude > 12 then
@@ -5491,22 +5689,29 @@ Net.Step = function(dt)
 			if move.Magnitude > 1 then move = unit2(move) end
 		end
 	end
-	local sprint = keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift]
+	local sprint = keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] or UI.joystickSprint
+
+	-- 2) Движение шлём UnreliableRemoteEvent-ом 30 раз/сек: серверу нужен
+	-- только самый свежий вектор, старые пакеты не должны стоять в надёжной очереди.
+	-- Seq защищает от редкой смены порядка. Удар при этом идёт отдельным надёжным каналом.
 	local inputKey = string.format("%.2f|%.2f|%s|%s|%s", move.X, move.Y, tostring(sprint), tostring(isCharging), state)
 	Net.InputTimer = Net.InputTimer - dt
-	if matchInputRemote and (Net.InputTimer <= 0 or inputKey ~= Net.LastInputKey) then
+	if matchInputRemote and Net.InputTimer <= 0 and (state == "Playing" or inputKey ~= Net.LastInputKey) then
+		Net.InputSeq = (Net.InputSeq or 0) + 1
 		matchInputRemote:FireServer({
+			Seq = Net.InputSeq,
 			MoveX = move.X,
 			MoveY = move.Y,
 			Sprint = sprint == true,
 			Charging = isCharging == true,
 		})
-		Net.InputTimer = 0.05
+		Net.InputTimer = 1 / 30
 		Net.LastInputKey = inputKey
 	end
 
-	-- Локальное предсказание ТОЛЬКО своей фишки. Оно повторяет серверную
-	-- формулу разгона/торможения и потом плавно сверяется со снимками.
+	-- 3) Локальное предсказание своей фишки каждый RenderStepped.
+	-- Скорость здесь НАКАПЛИВАЕТСЯ из предыдущего предсказания; серверный
+	-- снапшот в applySnapshot делает только мягкую коррекцию ошибки.
 	if state == "Playing" and Net.LocalSlot >= 1 and Net.LocalSlot <= 6 then
 		local localPos, localVel = Net.GetLocalState()
 		local maxSpeed = ((sprint and SETTINGS.PLAYER_SPRINT) or SETTINGS.PLAYER_SPEED) * FIELD_SCALE
@@ -5528,6 +5733,53 @@ Net.Step = function(dt)
 		localPos, localVel = applyFieldClamp(localPos, localVel, PLAYER_R)
 		setSlotState(Net.LocalSlot, localPos, localVel, nil)
 	end
+
+	-- 4) Чужие фишки и мяч: dead-reckoning цели между снапшотами + быстрый Lerp.
+	-- Свою фишку обычным Lerp не трогаем вообще — ею управляет предсказание выше.
+	local targets = Net.Targets
+	if targets then
+		local slotAlpha = 1 - math.exp(-34 * dt)
+		local ballAlpha = 1 - math.exp(-42 * dt)
+		for slot, info in pairs(targets.Slots or {}) do
+			if slot ~= Net.LocalSlot then
+				if state == "Playing" then
+					info.Pos = clampToField(info.Pos + info.Vel * dt, PLAYER_R)
+				end
+				lerpSlot(slot, info, slotAlpha)
+			end
+		end
+		if targets.Ball then
+			if state == "Playing" and targets.BallVel then
+				targets.Ball = targets.Ball + targets.BallVel * dt
+				targets.BallVel = targets.BallVel * math.pow(0.34, dt)
+				if targets.BallVel.Magnitude < 10 * FIELD_SCALE then
+					targets.BallVel = Vector2.new(0, 0)
+				end
+				if inGoalMouth(targets.Ball.Y) then
+					targets.Ball = Vector2.new(targets.Ball.X, clamp(targets.Ball.Y, BALL_R, FIELD_H - BALL_R))
+				else
+					targets.Ball = clampToField(targets.Ball, BALL_R)
+				end
+			end
+			ballPos = ballPos:Lerp(targets.Ball, ballAlpha)
+			ballVel = targets.BallVel or ballVel
+		end
+	end
+
+	if state == "Playing" then
+		-- Только визуальная страховка между серверными снимками: предсказанная
+		-- своя фишка не должна на долю секунды визуально залезть внутрь мяча/игрока.
+		resolveChipChip()
+		resolveBallChipOverlaps()
+	end
+
+	if state == "Countdown" then
+		local remain = Net.CountdownEndsAt - workspace:GetServerTimeNow()
+		UI.countdownLabel.Visible = true
+		UI.countdownLabel.Text = (remain > 0.15) and tostring(math.ceil(remain)) or "⚽ ИГРА!"
+	elseif state == "Playing" then
+		UI.countdownLabel.Visible = false
+	end
 end
 
 task.spawn(function()
@@ -5539,9 +5791,10 @@ task.spawn(function()
 	roomRF = folder:WaitForChild("RoomRF", 8)
 	roomUpdateRemote = folder:WaitForChild("RoomUpdate", 8)
 	matchInputRemote = folder:WaitForChild("MatchInput", 8)
+	matchKickRemote = folder:WaitForChild("MatchKick", 8)
 	matchEventRemote = folder:WaitForChild("MatchEvent", 8)
 	matchSnapshotRemote = folder:WaitForChild("MatchSnapshot", 8)
-	if not roomRF or not roomUpdateRemote or not matchInputRemote or not matchEventRemote or not matchSnapshotRemote then
+	if not roomRF or not roomUpdateRemote or not matchInputRemote or not matchKickRemote or not matchEventRemote or not matchSnapshotRemote then
 		setNetStatus("Онлайн-сервер найден, но RemoteEvent-ы созданы не полностью")
 		return
 	end
@@ -5608,19 +5861,30 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		end
 	end
 
-	if input.UserInputType == Enum.UserInputType.Touch and state == "Playing" and not gameProcessed then
+	if input.UserInputType == Enum.UserInputType.Touch and UI.gameFrame.Visible then
 		local p = toGuiSpace(Vector2.new(input.Position.X, input.Position.Y))
-		if isScreenPosInsideField(p) then
+		-- Джойстик обрабатываем первым и запоминаем именно этот палец:
+		-- второй палец в этот момент может спокойно держать кнопку мяча.
+		if (state == "Playing" or state == "Countdown") and UI.beginJoystick and UI.beginJoystick(input, p) then
+			return
+		end
+		if state == "Playing" and not gameProcessed and isScreenPosInsideField(p) then
 			touchActive = true
+			UI.fieldTouchInput = input
 			touchFieldPos = screenToField(p)
 		end
 	end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.Touch and touchActive then
+	if input.UserInputType == Enum.UserInputType.Touch then
 		local p = toGuiSpace(Vector2.new(input.Position.X, input.Position.Y))
-		touchFieldPos = screenToField(p)
+		if UI.moveJoystick and UI.moveJoystick(input, p) then
+			return
+		end
+		if touchActive and UI.fieldTouchInput == input then
+			touchFieldPos = screenToField(p)
+		end
 	end
 end)
 
@@ -5634,7 +5898,17 @@ UserInputService.InputEnded:Connect(function(input)
 		end
 	end
 	if input.UserInputType == Enum.UserInputType.Touch then
-		touchActive = false
+		if UI.kickTouchInput == input then
+			UI.kickTouchInput = nil
+			if isCharging and chargeAimToGoal then
+				releaseKick()
+			end
+		end
+		local wasJoystick = UI.endJoystick and UI.endJoystick(input)
+		if not wasJoystick and UI.fieldTouchInput == input then
+			touchActive = false
+			UI.fieldTouchInput = nil
+		end
 	end
 end)
 
@@ -5642,6 +5916,9 @@ end)
 UserInputService.WindowFocusReleased:Connect(function()
 	keysDown = {}
 	touchActive = false
+	UI.fieldTouchInput = nil
+	UI.kickTouchInput = nil
+	if UI.resetJoystick then UI.resetJoystick() end
 	if isCharging then
 		cancelCharge()
 	end
@@ -5649,7 +5926,7 @@ end)
 
 -- Кнопка УДАР (телефон): держишь — заряд, отпустил — физический удар от фишки через мяч
 UI.kickButton.MouseButton1Down:Connect(function()
-	if state == "Playing" then
+	if state == "Playing" and not isCharging then
 		isCharging = true
 		chargeAimToGoal = true
 		chargePower = 0
@@ -5659,6 +5936,26 @@ end)
 UI.kickButton.MouseButton1Up:Connect(function()
 	if isCharging and chargeAimToGoal then
 		releaseKick()
+	end
+end)
+-- Прямой сенсорный путь для мультитача: один палец держит мяч, второй ведёт джойстик.
+UI.kickButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch and state == "Playing" then
+		UI.kickTouchInput = input
+		if not isCharging then
+			isCharging = true
+			chargeAimToGoal = true
+			chargePower = 0
+			UI.powerBarBg.Visible = true
+		end
+	end
+end)
+UI.kickButton.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch and UI.kickTouchInput == input then
+		UI.kickTouchInput = nil
+		if isCharging and chargeAimToGoal then
+			releaseKick()
+		end
 	end
 end)
 
@@ -5722,6 +6019,7 @@ render()
 updateHUD()
 
 RunService.RenderStepped:Connect(function(dt)
+	local netDt = math.min(dt, 0.05)
 	if dt > 1 / 30 then
 		dt = 1 / 30
 	end
@@ -5736,7 +6034,8 @@ RunService.RenderStepped:Connect(function(dt)
 	end
 
 	if Net.InMatch then
-		if Net.Step then Net.Step(dt) end
+		-- Онлайн-предсказание получает реальный dt до 50 мс: на слабом FPS оно не отстаёт от сервера из-за общего капа 1/30.
+		if Net.Step then Net.Step(netDt) end
 		updateDirectionMarkers(dt)
 		if state == "Playing" then chargeStep(dt) end
 	elseif state == "Playing" then
@@ -5763,4 +6062,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.9 загружена ✅ Выбери «ОФФЛАЙН» или «ОНЛАЙН» в лобби!")
+print("[ROBALL] Часть 1 v1.9.1 загружена ✅ Быстрый онлайн и мобильный джойстик готовы!")
