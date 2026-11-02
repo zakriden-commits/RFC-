@@ -1,15 +1,23 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.9.1 (НИЗКАЯ ЗАДЕРЖКА + МОБИЛЬНЫЙ ДЖОЙСТИК)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.9.2 (БЕЗ ТРЯСКИ + ПЛАВНЫЙ ТЕЛЕФОН)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
 
-  ЧТО НОВОГО В 1.9.1:
+  ЧТО НОВОГО В 1.9.2:
+  • Чужие игроки и мяч рисуются через временной буфер между двумя серверными
+    снимками, а коррекция своей фишки растянута по кадрам — быстрой тряски
+    от сетевого джиттера и резкого Lerp больше быть не должно
+  • Убран тяжёлый визуальный решатель перекрытий на каждый кадр онлайна:
+    он мог дёргать фишки и заметно грузить телефон
+  • Джойстик поднят выше от нижнего края, ход стал мягче и точнее, авто-спринт
+    от края убран: телефон больше не разгоняется сам быстрее ПК
+
+  ЧТО НОВОГО БЫЛО В 1.9.1:
   • Переписан отклик онлайна: своя фишка предсказывается локально каждый кадр,
     ввод и снапшоты идут 30 раз/сек, серверное время компенсирует возраст пакета,
     а движение больше не ждёт медленного Lerp к прошлому серверному снимку
   • На телефоне: большой аналоговый джойстик слева и круглая кнопка мяча справа.
-    Стик можно вести пальцем — наклон и скорость фишки следуют прямо за рукой;
-    сильное отклонение стика до края включает спринт
+    Стик можно вести пальцем — наклон и скорость фишки следуют прямо за рукой
   • Шкала силы удара заряжается в два раза быстрее: полная примерно за 0.73 сек
 
   ЧТО НОВОГО БЫЛО В 1.9:
@@ -359,6 +367,7 @@ local Net = {
 	LastInputKey = "",
 	LastSnapshotServerTime = 0,
 	SnapshotAge = 0,
+	SnapshotBuffer = {},
 	KickSeq = 0,
 	Targets = nil,
 	SnapshotState = "Menu",
@@ -422,6 +431,7 @@ local UI = {
 	onlineModeButtons = {},
 	onlineGoalButtons = {},
 	joystickVector = Vector2.new(0, 0),
+	joystickTargetVector = Vector2.new(0, 0),
 	joystickActive = false,
 	joystickSprint = false,
 }
@@ -1301,7 +1311,7 @@ makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1 • v1.9.1",
+	Text = "ЧАСТЬ 1 • v1.9.2",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -2615,12 +2625,12 @@ addStroke(UI.kickButton, Color3.fromRGB(12, 16, 24), 3, 0.12)
 addGradient(UI.kickButton, Color3.fromRGB(255, 255, 255), Color3.fromRGB(150, 165, 185), 90)
 
 do -- мобильный аналоговый джойстик: один раз строится, дальше живёт в UI
--- Слева внизу. Палец ведёт ручку, вектор джойстика сразу становится направлением
--- и силой движения персонажа; отклонение почти до края включает спринт.
+-- Слева, заметно выше нижнего края: пальцу хватает места тянуть стик вниз.
+-- Вектор сглаживается по кадрам и не включает скрытый авто-спринт.
 UI.joystickBase = create("Frame", {
 	Name = "MobileJoystick",
 	AnchorPoint = Vector2.new(0, 1),
-	Position = UDim2.new(0, 22, 1, -22),
+	Position = UDim2.new(0, 22, 1, -84),
 	Size = UDim2.fromOffset(154, 154),
 	BackgroundColor3 = Color3.fromRGB(7, 18, 30),
 	BackgroundTransparency = 0.24,
@@ -2686,12 +2696,14 @@ local function joystickCenterAndRadius()
 	local base = UI.joystickBase
 	local size = base.AbsoluteSize
 	local center = base.AbsolutePosition + size / 2
-	local radius = math.max(28, math.min(size.X, size.Y) * 0.29) -- ручка целиком остаётся внутри базы
-	return center, radius, size
+	local knobRadius = math.max(28, math.min(size.X, size.Y) * 0.29) -- видимая ручка целиком внутри базы
+	local inputRadius = math.max(44, math.min(size.X, size.Y) * 0.46) -- полный ход пальца мягче и точнее
+	return center, knobRadius, size, inputRadius
 end
 
 UI.resetJoystick = function()
 	UI.joystickVector = Vector2.new(0, 0)
+	UI.joystickTargetVector = Vector2.new(0, 0)
 	UI.joystickActive = false
 	UI.joystickSprint = false
 	UI.joystickInput = nil
@@ -2702,31 +2714,53 @@ end
 
 UI.updateJoystickFromScreen = function(screenPos)
 	if not UI.joystickBase then return false end
-	local center, radius = joystickCenterAndRadius()
-	local offset = screenPos - center
-	if offset.Magnitude > radius then
-		offset = unit2(offset) * radius
+	local center, knobRadius, _, inputRadius = joystickCenterAndRadius()
+	local rawOffset = screenPos - center
+	local knobOffset = rawOffset
+	if knobOffset.Magnitude > knobRadius then
+		knobOffset = unit2(knobOffset) * knobRadius
 	end
 	if UI.joystickKnob then
-		UI.joystickKnob.Position = UDim2.new(0.5, offset.X, 0.5, offset.Y)
+		UI.joystickKnob.Position = UDim2.new(0.5, knobOffset.X, 0.5, knobOffset.Y)
 	end
-	local normalized = (radius > 0) and (offset / radius) or Vector2.new(0, 0)
-	local magnitude = normalized.Magnitude
-	local deadZone = 0.10
-	if magnitude <= deadZone then
-		UI.joystickVector = Vector2.new(0, 0)
+
+	-- Полная скорость достигается на большем ходе пальца, чем видимый ход ручки.
+	-- Кривая 1.25 делает начало спокойным: телефон не срывается с места от
+	-- микродвижений пальца и не получает скрытый спринт у края.
+	local normalizedMagnitude = clamp(rawOffset.Magnitude / math.max(inputRadius, 1), 0, 1)
+	local deadZone = 0.12
+	if normalizedMagnitude <= deadZone or rawOffset.Magnitude < 0.01 then
+		UI.joystickTargetVector = Vector2.new(0, 0)
 	else
-		local aliveMagnitude = clamp((magnitude - deadZone) / (1 - deadZone), 0, 1)
-		UI.joystickVector = unit2(normalized) * aliveMagnitude
+		local aliveMagnitude = clamp((normalizedMagnitude - deadZone) / (1 - deadZone), 0, 1)
+		local curvedMagnitude = math.pow(aliveMagnitude, 1.25)
+		UI.joystickTargetVector = unit2(rawOffset) * curvedMagnitude
 	end
-	UI.joystickSprint = magnitude >= 0.96
+	UI.joystickSprint = false
 	return true
+end
+
+UI.stepJoystick = function(dt)
+	if not UI.joystickActive then
+		UI.joystickVector = Vector2.new(0, 0)
+		UI.joystickTargetVector = Vector2.new(0, 0)
+		return
+	end
+	local target = UI.joystickTargetVector or Vector2.new(0, 0)
+	local alpha = 1 - math.exp(-30 * math.max(dt, 0))
+	UI.joystickVector = (UI.joystickVector or Vector2.new(0, 0)):Lerp(target, alpha)
+	if target.Magnitude < 0.01 and UI.joystickVector.Magnitude < 0.02 then
+		UI.joystickVector = Vector2.new(0, 0)
+	end
+	if UI.joystickVector.Magnitude > 1 then
+		UI.joystickVector = unit2(UI.joystickVector)
+	end
 end
 
 UI.isJoystickScreenPos = function(screenPos)
 	if not UI.joystickBase then return false end
 	local center, _, size = joystickCenterAndRadius()
-	local captureRadius = math.min(size.X, size.Y) * 0.72
+	local captureRadius = math.min(size.X, size.Y) * 0.80
 	return (screenPos - center).Magnitude <= captureRadius
 end
 
@@ -4458,7 +4492,7 @@ local function playerStep(dt)
 	end
 
 	local speed = SETTINGS.PLAYER_SPEED * FIELD_SCALE
-	if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] or UI.joystickSprint then
+	if keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] then
 		speed = SETTINGS.PLAYER_SPRINT * FIELD_SCALE
 	end
 	if isCharging then
@@ -5438,6 +5472,32 @@ local function lerpSlot(slot, target, alpha)
 	end
 end
 
+-- Лёгкая визуальная страховка онлайна: двигаем только мяч, если интерполяция
+-- на кадр посадила его внутрь фишки. Полный офлайн-решатель здесь не нужен:
+-- он на каждом кадре толкал сами фишки/скорости и мог создавать тряску и
+-- лишнюю нагрузку на телефоне. Позиции людей здесь не меняем вообще.
+local function softSeparateOnlineBall()
+	local minDist = PLAYER_R + BALL_R + 0.15
+	for _pass = 1, 2 do
+		local function pushFrom(chipPos)
+			local diff = ballPos - chipPos
+			local dist = diff.Magnitude
+			if dist < minDist then
+				local normal = (dist > 0.01) and (diff / dist) or Vector2.new(1, 0)
+				ballPos = chipPos + normal * minDist
+			end
+		end
+		pushFrom(playerPos)
+		pushFrom(botPos)
+		for _, actor in ipairs(extraActors) do
+			if actor.Active then
+				pushFrom(actor.Pos)
+			end
+		end
+	end
+	keepBallInsideForSolver()
+end
+
 local function startOnlineMatch(data)
 	local room = data.Room
 	if type(room) ~= "table" then return end
@@ -5450,6 +5510,9 @@ local function startOnlineMatch(data)
 	Net.WinnerTeam = nil
 	Net.WinnerReason = nil
 	Net.Targets = nil
+	Net.SnapshotBuffer = {}
+	Net.LocalAuth = nil
+	Net.HasSnapshot = false
 	Net.LastSnapshotSeq = 0
 	matchMode = room.Mode or "1v1"
 	teamSize = tonumber(room.TeamSize) or ((matchMode == "3v3" and 3) or (matchMode == "2v2" and 2) or 1)
@@ -5517,6 +5580,10 @@ local function applySnapshot(data)
 
 	local targets = Net.Targets or { Slots = {} }
 	targets.Slots = targets.Slots or {}
+	-- Сырой снимок без компенсации возраста кладём во временной буфер.
+	-- Net.Step нарисует чужих игроков и мяч между соседними снимками:
+	-- сетевой джиттер перестанет превращаться в быструю тряску фишек.
+	local bufferEntry = { Time = serverTime, Slots = {} }
 	if type(data.Ball) == "table" then
 		-- Компактный формат сервера: {X, Y, VX, VY, Rot}.
 		local rawBallPos = Vector2.new(tonumber(data.Ball[1] or data.Ball.X) or ballPos.X, tonumber(data.Ball[2] or data.Ball.Y) or ballPos.Y)
@@ -5529,6 +5596,9 @@ local function applySnapshot(data)
 		targets.Ball = rawBallPos + rawBallVel * ballTravel
 		targets.BallVel = rawBallVel * math.pow(0.34, snapshotAge)
 		targets.BallRot = tonumber(data.Ball[5] or data.Ball.Rot)
+		bufferEntry.Ball = rawBallPos
+		bufferEntry.BallVel = rawBallVel
+		bufferEntry.BallRot = targets.BallRot
 	end
 
 	local localAuth = nil
@@ -5547,6 +5617,11 @@ local function applySnapshot(data)
 					Facing = tonumber(info[5] or info.F),
 				}
 				targets.Slots[slotNumber] = target
+				bufferEntry.Slots[slotNumber] = {
+					Pos = clampToField(rawPos, PLAYER_R),
+					Vel = rawVel,
+					Facing = target.Facing,
+				}
 				if slotNumber == Net.LocalSlot then
 					localAuth = target
 				end
@@ -5556,29 +5631,32 @@ local function applySnapshot(data)
 	Net.Targets = targets
 
 	local shouldSnap = data.Snap == true or not Net.HasSnapshot
-	if not shouldSnap and targets.Ball and (targets.Ball - ballPos).Magnitude > 220 * FIELD_SCALE then
+	if not shouldSnap and targets.Ball and (targets.Ball - ballPos).Magnitude > 320 * FIELD_SCALE then
 		shouldSnap = true
 	end
 	Net.HasSnapshot = true
 	if shouldSnap then
+		Net.SnapshotBuffer = { bufferEntry }
+	else
+		local buffer = Net.SnapshotBuffer or {}
+		table.insert(buffer, bufferEntry)
+		while #buffer > 2 and buffer[2].Time <= serverTime - 0.45 do
+			table.remove(buffer, 1)
+		end
+		Net.SnapshotBuffer = buffer
+	end
+	Net.LocalAuth = localAuth
+
+	if shouldSnap then
 		snapToTargets()
 	elseif localAuth then
-		-- Реконсиляция предсказания: позицию своей фишки НЕ заменяем прошлым
-		-- серверным кадром и скорость НЕ сбрасываем каждый кадр (это и давало
-		-- ощущение огромного пинга). Небольшую ошибку оставляем предсказанию,
-		-- среднюю мягко подтягиваем, огромную (столкновение/телепорт) чиним сразу.
-		local currentPos, currentVel = Net.GetLocalState()
-		local positionError = localAuth.Pos - currentPos
-		local dist = positionError.Magnitude
-		if dist > 135 * FIELD_SCALE then
+		-- В момент пакета свою фишку больше не дёргаем мгновенной коррекцией.
+		-- Net.Step ниже каждый RenderStepped плавно и с ограничением скорости
+		-- подтянет предсказание к Net.LocalAuth. Сюда оставлен только аварийный
+		-- перенос при огромной ошибке (столкновение, телепорт, потеря пакетов).
+		local currentPos = Net.GetLocalState()
+		if (localAuth.Pos - currentPos).Magnitude > 170 * FIELD_SCALE then
 			setSlotState(Net.LocalSlot, localAuth.Pos, localAuth.Vel, localAuth.Facing)
-		elseif dist > 4 then
-			local correctionAlpha = clamp(0.16 + dist / (430 * FIELD_SCALE), 0.16, 0.42)
-			local correctedVel = currentVel
-			if dist > 22 * FIELD_SCALE then
-				correctedVel = currentVel:Lerp(localAuth.Vel, 0.35)
-			end
-			setSlotState(Net.LocalSlot, currentPos + positionError * correctionAlpha, correctedVel, nil)
 		end
 	end
 
@@ -5655,6 +5733,8 @@ local function onMatchEvent(data)
 	elseif data.Type == "Aborted" then
 		Net.InMatch = false
 		Net.Targets = nil
+		Net.SnapshotBuffer = {}
+		Net.LocalAuth = nil
 		Net.HasSnapshot = false
 		Net.LastSnapshotSeq = 0
 		goToMenu()
@@ -5689,11 +5769,13 @@ Net.Step = function(dt)
 			if move.Magnitude > 1 then move = unit2(move) end
 		end
 	end
-	local sprint = keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] or UI.joystickSprint
+	local sprint = keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift]
 
-	-- 2) Движение шлём UnreliableRemoteEvent-ом 30 раз/сек: серверу нужен
-	-- только самый свежий вектор, старые пакеты не должны стоять в надёжной очереди.
-	-- Seq защищает от редкой смены порядка. Удар при этом идёт отдельным надёжным каналом.
+	-- 2) Движение шлём UnreliableRemoteEvent-ом: серверу нужен только самый
+	-- свежий вектор, старые пакеты не должны стоять в надёжной очереди.
+	-- Клавиатуре хватает 30 Гц, а аналоговый палец меняет вектор непрерывно,
+	-- поэтому активный джойстик шлём до 60 Гц — сервер меньше отстаёт от руки.
+	-- Seq защищает от смены порядка. Удар идёт отдельным надёжным каналом.
 	local inputKey = string.format("%.2f|%.2f|%s|%s|%s", move.X, move.Y, tostring(sprint), tostring(isCharging), state)
 	Net.InputTimer = Net.InputTimer - dt
 	if matchInputRemote and Net.InputTimer <= 0 and (state == "Playing" or inputKey ~= Net.LastInputKey) then
@@ -5705,7 +5787,7 @@ Net.Step = function(dt)
 			Sprint = sprint == true,
 			Charging = isCharging == true,
 		})
-		Net.InputTimer = 1 / 30
+		Net.InputTimer = (UI.joystickActive or touchActive) and (1 / 60) or (1 / 30)
 		Net.LastInputKey = inputKey
 	end
 
@@ -5734,43 +5816,124 @@ Net.Step = function(dt)
 		setSlotState(Net.LocalSlot, localPos, localVel, nil)
 	end
 
-	-- 4) Чужие фишки и мяч: dead-reckoning цели между снапшотами + быстрый Lerp.
-	-- Свою фишку обычным Lerp не трогаем вообще — ею управляет предсказание выше.
-	local targets = Net.Targets
-	if targets then
-		local slotAlpha = 1 - math.exp(-34 * dt)
-		local ballAlpha = 1 - math.exp(-42 * dt)
-		for slot, info in pairs(targets.Slots or {}) do
-			if slot ~= Net.LocalSlot then
-				if state == "Playing" then
-					info.Pos = clampToField(info.Pos + info.Vel * dt, PLAYER_R)
-				end
-				lerpSlot(slot, info, slotAlpha)
+	-- 3.5) Коррекцию своей фишки растягиваем по RenderStepped-кадрам.
+	-- Раньше ошибка чинилась одним Lerp-шагом в момент каждого пакета 30 Гц:
+	-- при обычном сетевом джиттере это выглядело как мелкая быстрая тряска.
+	-- Теперь за кадр разрешён ограниченный сдвиг, а ошибка до 9 px игнорируется.
+	local auth = Net.LocalAuth
+	if auth and Net.LocalSlot >= 1 and Net.LocalSlot <= 6 then
+		if state == "Playing" then
+			auth.Pos = clampToField(auth.Pos + auth.Vel * dt, PLAYER_R)
+		end
+		local currentPos, currentVel = Net.GetLocalState()
+		local positionError = auth.Pos - currentPos
+		local errorDist = positionError.Magnitude
+		if errorDist > 170 * FIELD_SCALE then
+			setSlotState(Net.LocalSlot, auth.Pos, auth.Vel, auth.Facing)
+		elseif errorDist > 9 * FIELD_SCALE then
+			local requested = errorDist * (1 - math.exp(-7 * dt))
+			local maxCorrection = 280 * FIELD_SCALE * dt
+			local correctedPos = currentPos + unit2(positionError) * math.min(requested, maxCorrection)
+			local correctedVel = currentVel
+			if errorDist > 48 * FIELD_SCALE then
+				correctedVel = currentVel:Lerp(auth.Vel, 1 - math.exp(-5 * dt))
+			end
+			setSlotState(Net.LocalSlot, correctedPos, correctedVel, nil)
+		end
+	end
+
+	-- 4) Чужие фишки и мяч: интерполяция между двумя серверными снимками.
+	-- Рендер-время специально на 92 мс позади серверного. Это крошечная
+	-- фиксированная задержка только для чужих объектов, зато движение между
+	-- пакетами становится равномерным, а джиттер доставки не дёргает людей.
+	-- Своя фишка сюда не попадает: она по-прежнему предсказывается мгновенно.
+	local buffer = Net.SnapshotBuffer
+	if buffer and #buffer > 0 then
+		local renderTime = workspace:GetServerTimeNow() - 0.092
+		while #buffer > 2 and buffer[2].Time <= renderTime do
+			table.remove(buffer, 1)
+		end
+		local latest = buffer[#buffer]
+		local fromSnap = buffer[1]
+		local toSnap = latest
+		for i = #buffer - 1, 1, -1 do
+			if buffer[i].Time <= renderTime then
+				fromSnap = buffer[i]
+				toSnap = buffer[i + 1]
+				break
 			end
 		end
-		if targets.Ball then
-			if state == "Playing" and targets.BallVel then
-				targets.Ball = targets.Ball + targets.BallVel * dt
-				targets.BallVel = targets.BallVel * math.pow(0.34, dt)
-				if targets.BallVel.Magnitude < 10 * FIELD_SCALE then
-					targets.BallVel = Vector2.new(0, 0)
-				end
-				if inGoalMouth(targets.Ball.Y) then
-					targets.Ball = Vector2.new(targets.Ball.X, clamp(targets.Ball.Y, BALL_R, FIELD_H - BALL_R))
-				else
-					targets.Ball = clampToField(targets.Ball, BALL_R)
+		local span = toSnap.Time - fromSnap.Time
+		local alpha = (span > 0.0001) and clamp((renderTime - fromSnap.Time) / span, 0, 1) or 1
+		local extrapolate = 0
+		if renderTime > latest.Time then
+			-- Пакет задержался: коротко и ограниченно продолжаем последний снимок,
+			-- вместо замирания или резкого прыжка на следующем пакете.
+			extrapolate = math.min(renderTime - latest.Time, 0.08)
+			fromSnap = latest
+			toSnap = latest
+			alpha = 1
+		end
+
+		for slot = 1, 6 do
+			if slot ~= Net.LocalSlot then
+				local aInfo = fromSnap.Slots and fromSnap.Slots[slot]
+				local bInfo = toSnap.Slots and toSnap.Slots[slot]
+				if aInfo and bInfo then
+					local smoothPos
+					if extrapolate > 0 and state == "Playing" then
+						smoothPos = clampToField(bInfo.Pos + bInfo.Vel * extrapolate, PLAYER_R)
+					else
+						smoothPos = aInfo.Pos:Lerp(bInfo.Pos, alpha)
+					end
+					local smoothFacing = bInfo.Facing
+					if aInfo.Facing and bInfo.Facing then
+						smoothFacing = lerpAngle(aInfo.Facing, bInfo.Facing, alpha)
+					end
+					local smoothVel = bInfo.Vel
+					if extrapolate <= 0 and span > 0.0001 and span <= 0.15 then
+						-- Скорость именно рисуемого отрезка: маркер направления
+						-- не дёргается от мгновенного серверного Vel каждого пакета.
+						smoothVel = (bInfo.Pos - aInfo.Pos) / span
+					end
+					setSlotState(slot, smoothPos, smoothVel, smoothFacing)
+				elseif bInfo then
+					setSlotState(slot, bInfo.Pos, bInfo.Vel, bInfo.Facing)
 				end
 			end
-			ballPos = ballPos:Lerp(targets.Ball, ballAlpha)
-			ballVel = targets.BallVel or ballVel
+		end
+
+		if fromSnap.Ball and toSnap.Ball then
+			if extrapolate > 0 and state == "Playing" and toSnap.BallVel then
+				local travel = (1 - math.pow(0.34, extrapolate)) / 1.0788
+				ballPos = toSnap.Ball + toSnap.BallVel * travel
+				ballVel = toSnap.BallVel * math.pow(0.34, extrapolate)
+				if ballVel.Magnitude < 10 * FIELD_SCALE then
+					ballVel = Vector2.new(0, 0)
+				end
+				if inGoalMouth(ballPos.Y) then
+					ballPos = Vector2.new(ballPos.X, clamp(ballPos.Y, BALL_R, FIELD_H - BALL_R))
+				else
+					ballPos = clampToField(ballPos, BALL_R)
+				end
+			else
+				ballPos = fromSnap.Ball:Lerp(toSnap.Ball, alpha)
+				if fromSnap.BallVel and toSnap.BallVel then
+					ballVel = fromSnap.BallVel:Lerp(toSnap.BallVel, alpha)
+				elseif toSnap.BallVel then
+					ballVel = toSnap.BallVel
+				end
+			end
+		elseif toSnap.Ball then
+			ballPos = toSnap.Ball
+			ballVel = toSnap.BallVel or ballVel
 		end
 	end
 
 	if state == "Playing" then
-		-- Только визуальная страховка между серверными снимками: предсказанная
-		-- своя фишка не должна на долю секунды визуально залезть внутрь мяча/игрока.
-		resolveChipChip()
-		resolveBallChipOverlaps()
+		-- Только лёгкая страховка мяча. Людей здесь не толкаем: полный решатель
+		-- на каждом кадре онлайна мог сам создавать тряску и грузить телефон.
+		softSeparateOnlineBall()
 	end
 
 	if state == "Countdown" then
@@ -6033,6 +6196,8 @@ RunService.RenderStepped:Connect(function(dt)
 		return
 	end
 
+	if UI.stepJoystick then UI.stepJoystick(netDt) end
+
 	if Net.InMatch then
 		-- Онлайн-предсказание получает реальный dt до 50 мс: на слабом FPS оно не отстаёт от сервера из-за общего капа 1/30.
 		if Net.Step then Net.Step(netDt) end
@@ -6062,4 +6227,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.9.1 загружена ✅ Быстрый онлайн и мобильный джойстик готовы!")
+print("[ROBALL] Часть 1 v1.9.2 загружена ✅ Плавный онлайн без тряски готов!")
