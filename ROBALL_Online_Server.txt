@@ -1,0 +1,1520 @@
+--[[
+================================================================================
+  ROBALL ONLINE SERVER v1.9 — серверная часть онлайн-комнат
+================================================================================
+
+  КУДА ВСТАВИТЬ:
+    Roblox Studio → ServerScriptService → обычный Script
+    (НЕ LocalScript и НЕ ModuleScript)
+
+  Клиент остаётся прежним:
+    StarterGui → LocalScript → код из Football_2D_Part1.txt
+
+  Этот Script сам создаёт папку ReplicatedStorage/ROBALL_Online и все
+  RemoteEvent/RemoteFunction. Вручную ничего создавать не нужно.
+
+  ЧТО УМЕЕТ:
+    • публичный список комнат для всех игроков ТЕКУЩЕГО сервера Roblox;
+    • создание комнаты 1×1 / 2×2 / 3×3;
+    • выбор количества голов до победы: 1, 2, 3, 5, 7, 10;
+    • ник и аватар создателя в списке серверов;
+    • свободное подключение любого игрока, пока есть места;
+    • автоматический старт, когда набрались 2 / 4 / 6 игроков;
+    • серверная физика фишек и мяча: клиент не может просто прислать гол,
+      телепортировать мяч или задать выдуманное направление удара;
+    • удар рассчитывается по физической линии ЦЕНТР ФИШКИ → ЦЕНТР МЯЧА;
+    • поля 1000×600, 1240×744 и 1480×888 — как в офлайн-клиенте;
+    • матч 2:00, при ничьей — золотой гол;
+    • реванш запускается только когда проголосовали ВСЕ участники;
+    • если игрок вышел посреди матча, матч честно останавливается.
+
+  ВАЖНО:
+    Комнаты видны игрокам, которые уже находятся на одном сервере Roblox.
+    Для теста в Studio: Test → Clients and Servers → несколько Players → Start.
+    В опубликованной игре игроки одного обычного сервера увидят комнаты
+    друг друга в каталоге «ОНЛАЙН».
+================================================================================
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+
+-- Защита от случайной второй копии Script в ServerScriptService.
+if ReplicatedStorage:GetAttribute("ROBALL_Online_Server_Running") then
+	warn("[ROBALL] Онлайн-сервер уже запущен: вторая копия Script отключена.")
+	return
+end
+ReplicatedStorage:SetAttribute("ROBALL_Online_Server_Running", true)
+
+--------------------------------------------------------------------------------
+-- Настройки онлайн-матча
+--------------------------------------------------------------------------------
+local MATCH_TIME = 120
+local SNAPSHOT_INTERVAL = 0.05 -- 20 снимков состояния в секунду
+local CHIP_R = 27
+local BALL_R = 13
+local CORNER_CUT = 72
+local PLAYER_SPEED = 285
+local PLAYER_SPRINT = 360
+local KICK_EXTRA_REACH = 28 -- небольшой сетевой допуск к физическому касанию
+local WIN_GOAL_OPTIONS = {
+	[1] = true,
+	[2] = true,
+	[3] = true,
+	[5] = true,
+	[7] = true,
+	[10] = true,
+}
+
+-- Размеры и ворота должны совпадать с клиентом v1.9.
+local LAYOUTS = {
+	["1v1"] = { TeamSize = 1, MaxPlayers = 2, W = 1000, H = 600, Scale = 1.00, GoalHalf = 90, Label = "1×1" },
+	["2v2"] = { TeamSize = 2, MaxPlayers = 4, W = 1240, H = 744, Scale = 1.24, GoalHalf = 100, Label = "2×2" },
+	["3v3"] = { TeamSize = 3, MaxPlayers = 6, W = 1480, H = 888, Scale = 1.48, GoalHalf = 112, Label = "3×3" },
+}
+
+--------------------------------------------------------------------------------
+-- Remote-объекты
+--------------------------------------------------------------------------------
+local oldFolder = ReplicatedStorage:FindFirstChild("ROBALL_Online")
+if oldFolder then
+	oldFolder:Destroy()
+end
+
+local netFolder = Instance.new("Folder")
+netFolder.Name = "ROBALL_Online"
+
+local function makeRemote(className, name)
+	local remote = Instance.new(className)
+	remote.Name = name
+	remote.Parent = netFolder
+	return remote
+end
+
+local RoomRF = makeRemote("RemoteFunction", "RoomRF")
+local RoomUpdate = makeRemote("RemoteEvent", "RoomUpdate")
+local MatchInput = makeRemote("RemoteEvent", "MatchInput")
+local MatchEvent = makeRemote("RemoteEvent", "MatchEvent")
+local MatchSnapshot = makeRemote("UnreliableRemoteEvent", "MatchSnapshot")
+
+netFolder.Parent = ReplicatedStorage
+
+--------------------------------------------------------------------------------
+-- Состояние комнат
+--------------------------------------------------------------------------------
+local roomsById = {}
+local roomByPlayer = {}
+local lastRoomCallAt = {}
+local roomSequence = 0
+
+--------------------------------------------------------------------------------
+-- Маленькие помощники
+--------------------------------------------------------------------------------
+local function clamp(value, minValue, maxValue)
+	if value < minValue then return minValue end
+	if value > maxValue then return maxValue end
+	return value
+end
+
+local function isFiniteNumber(value)
+	return type(value) == "number" and value == value and math.abs(value) < 1000000000
+end
+
+local function unit2(value)
+	local magnitude = value.Magnitude
+	if magnitude < 0.0001 then
+		return Vector2.new(0, 0)
+	end
+	return value / magnitude
+end
+
+local function lerpAngle(a, b, alpha)
+	local diff = (b - a + math.pi) % (math.pi * 2) - math.pi
+	return a + diff * clamp(alpha, 0, 1)
+end
+
+local function approachVelocity(current, desired, acceleration, dt)
+	local delta = desired - current
+	local maxChange = acceleration * dt
+	if delta.Magnitude <= maxChange then
+		return desired
+	end
+	return current + unit2(delta) * maxChange
+end
+
+local function teamForSlot(slot)
+	return (slot % 2 == 1) and "Blue" or "Red"
+end
+
+local function membersList(room)
+	local list = {}
+	for _, member in pairs(room.Members) do
+		table.insert(list, member)
+	end
+	table.sort(list, function(a, b)
+		return (a.Slot or 99) < (b.Slot or 99)
+	end)
+	return list
+end
+
+local function memberCount(room)
+	local count = 0
+	for _ in pairs(room.Members) do
+		count = count + 1
+	end
+	return count
+end
+
+local function findMember(room, player)
+	if not room then return nil end
+	for _, member in pairs(room.Members) do
+		if member.Player == player then
+			return member
+		end
+	end
+	return nil
+end
+
+local function firstFreeSlot(room)
+	local used = {}
+	for _, member in pairs(room.Members) do
+		used[member.Slot] = true
+	end
+	for slot = 1, room.MaxPlayers do
+		if not used[slot] then
+			return slot
+		end
+	end
+	return nil
+end
+
+local function makeMember(player, slot, isHost)
+	return {
+		Player = player,
+		UserId = player.UserId,
+		Name = player.Name,
+		DisplayName = player.DisplayName,
+		Slot = slot,
+		Team = teamForSlot(slot),
+		IsHost = isHost == true,
+		Rematch = false,
+		Input = {
+			Move = Vector2.new(0, 0),
+			Sprint = false,
+			Charging = false,
+		},
+		Pos = Vector2.new(0, 0),
+		Vel = Vector2.new(0, 0),
+		Facing = (slot % 2 == 1) and 0 or math.pi,
+		KickCooldown = 0,
+		LastKickSeq = -1,
+	}
+end
+
+local function serializeRoom(room)
+	local players = {}
+	for _, member in ipairs(membersList(room)) do
+		table.insert(players, {
+			UserId = member.Player.UserId,
+			Name = member.Player.Name,
+			DisplayName = member.Player.DisplayName,
+			Slot = member.Slot,
+			Team = member.Team,
+			IsHost = room.Host == member.Player,
+			Rematch = member.Rematch == true,
+		})
+	end
+
+	return {
+		Id = room.Id,
+		HostUserId = room.Host and room.Host.UserId or 0,
+		HostName = room.Host and room.Host.Name or "Игрок",
+		HostDisplayName = room.Host and room.Host.DisplayName or "Игрок",
+		Mode = room.Mode,
+		ModeLabel = room.ModeLabel,
+		TeamSize = room.TeamSize,
+		WinGoals = room.WinGoals,
+		MaxPlayers = room.MaxPlayers,
+		PlayerCount = #players,
+		Status = room.Status,
+		MatchTime = MATCH_TIME,
+		Players = players,
+	}
+end
+
+local function serializeRooms()
+	local rooms = {}
+	for _, room in pairs(roomsById) do
+		table.insert(rooms, room)
+	end
+	table.sort(rooms, function(a, b)
+		return a.CreatedOrder < b.CreatedOrder
+	end)
+
+	local result = {}
+	for _, room in ipairs(rooms) do
+		table.insert(result, serializeRoom(room))
+	end
+	return result
+end
+
+local function broadcastRooms()
+	RoomUpdate:FireAllClients({ Rooms = serializeRooms() })
+end
+
+local function sendMatchEvent(room, data)
+	for _, member in ipairs(membersList(room)) do
+		MatchEvent:FireClient(member.Player, data)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Геометрия поля
+--------------------------------------------------------------------------------
+local function layoutOf(room)
+	return LAYOUTS[room.Mode] or LAYOUTS["1v1"]
+end
+
+local function goalRange(room)
+	local layout = layoutOf(room)
+	local center = layout.H / 2
+	return center - layout.GoalHalf, center + layout.GoalHalf
+end
+
+local function inGoalMouth(room, y)
+	local y1, y2 = goalRange(room)
+	return y > y1 and y < y2
+end
+
+local function clampToField(room, pos, radius)
+	local layout = layoutOf(room)
+	local p = Vector2.new(
+		clamp(pos.X, radius, layout.W - radius),
+		clamp(pos.Y, radius, layout.H - radius)
+	)
+	local need = CORNER_CUT + radius * math.sqrt(2)
+
+	local tl = p.X + p.Y
+	if tl < need then
+		local add = (need - tl) / 2
+		p = Vector2.new(p.X + add, p.Y + add)
+	end
+
+	local tr = (layout.W - p.X) + p.Y
+	if tr < need then
+		local add = (need - tr) / 2
+		p = Vector2.new(p.X - add, p.Y + add)
+	end
+
+	local bl = p.X + (layout.H - p.Y)
+	if bl < need then
+		local add = (need - bl) / 2
+		p = Vector2.new(p.X + add, p.Y - add)
+	end
+
+	local br = (layout.W - p.X) + (layout.H - p.Y)
+	if br < need then
+		local add = (need - br) / 2
+		p = Vector2.new(p.X - add, p.Y - add)
+	end
+
+	return p
+end
+
+local function applyFieldClamp(room, pos, vel, radius)
+	local clamped = clampToField(room, pos, radius)
+	local correction = clamped - pos
+	if correction.Magnitude > 0.0001 then
+		local inward = unit2(correction)
+		local intoWallSpeed = vel:Dot(inward)
+		if intoWallSpeed < 0 then
+			vel = vel - inward * intoWallSpeed
+		end
+	end
+	return clamped, vel
+end
+
+local function keepBallInsideForSolver(room)
+	local match = room.Match
+	if not match then return end
+	if inGoalMouth(room, match.BallPos.Y) then
+		local layout = layoutOf(room)
+		match.BallPos = Vector2.new(
+			match.BallPos.X,
+			clamp(match.BallPos.Y, BALL_R, layout.H - BALL_R)
+		)
+	else
+		match.BallPos = clampToField(room, match.BallPos, BALL_R)
+	end
+end
+
+local function ballChipClearance(room, pos)
+	local best = math.huge
+	for _, member in pairs(room.Members) do
+		best = math.min(best, (pos - member.Pos).Magnitude)
+	end
+	return best
+end
+
+local function findFreeBallPosition(room, origin, preferredDir)
+	local layout = layoutOf(room)
+	local bestPos = nil
+	local bestScore = -math.huge
+	local minClearance = CHIP_R + BALL_R + 1.25
+
+	local function consider(rawPos)
+		local candidate = clampToField(room, rawPos, BALL_R + 1)
+		local clearance = ballChipClearance(room, candidate)
+		if clearance < minClearance then
+			return
+		end
+		local wallClearance = math.min(
+			candidate.X,
+			layout.W - candidate.X,
+			candidate.Y,
+			layout.H - candidate.Y
+		)
+		local offset = candidate - origin
+		local travel = offset.Magnitude
+		local directionScore = 0
+		if preferredDir and preferredDir.Magnitude > 0.01 and travel > 0.01 then
+			directionScore = (offset / travel):Dot(unit2(preferredDir)) * 34
+		end
+		local score = math.min(clearance, 78) * 0.82
+			+ math.min(wallClearance, 90) * 0.28
+			- travel * 1.05
+			+ directionScore * 0.55
+		if score > bestScore then
+			bestScore = score
+			bestPos = candidate
+		end
+	end
+
+	for _, radius in ipairs({ 46, 60, 76, 94, 118, 150, 190 }) do
+		for i = 0, 23 do
+			local angle = (i / 24) * math.pi * 2
+			consider(origin + Vector2.new(math.cos(angle), math.sin(angle)) * radius)
+		end
+	end
+	consider(origin:Lerp(Vector2.new(layout.W / 2, layout.H / 2), 0.32))
+	return bestPos
+end
+
+--------------------------------------------------------------------------------
+-- Снапшоты состояния
+--------------------------------------------------------------------------------
+local function sendSnapshot(room, snap)
+	local match = room.Match
+	if not match then return end
+
+	-- UnreliableRemoteEvent имеет лимит payload, поэтому позиции игроков
+	-- отправляем компактными массивами {X, Y, VX, VY, Facing}, а не словарями.
+	-- Seq нужен клиенту, чтобы игнорировать старый пакет, пришедший позже нового.
+	match.SnapshotSeq = (match.SnapshotSeq or 0) + 1
+	local players = {}
+	for _, member in ipairs(membersList(room)) do
+		players[member.Slot] = {
+			member.Pos.X,
+			member.Pos.Y,
+			member.Vel.X,
+			member.Vel.Y,
+			member.Facing,
+		}
+	end
+
+	local data = {
+		Seq = match.SnapshotSeq,
+		State = room.Status,
+		Snap = snap == true,
+		TimeLeft = match.TimeLeft,
+		Overtime = match.Overtime == true,
+		BlueScore = match.BlueScore,
+		RedScore = match.RedScore,
+		BlueShots = match.BlueShots,
+		RedShots = match.RedShots,
+		CountdownEndsAt = match.CountdownEndsAt,
+		Ball = {
+			match.BallPos.X,
+			match.BallPos.Y,
+			match.BallVel.X,
+			match.BallVel.Y,
+			match.BallRot,
+		},
+		Players = players,
+	}
+
+	for _, member in ipairs(membersList(room)) do
+		MatchSnapshot:FireClient(member.Player, data)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Расстановка и жизненный цикл матча
+--------------------------------------------------------------------------------
+local function formationPosition(room, slot, kickoffTeam)
+	local layout = layoutOf(room)
+	local fractions
+	if kickoffTeam == "Blue" then
+		fractions = {
+			[1] = { 0.425, 0.500 },
+			[2] = { 0.790, 0.500 },
+			[3] = { 0.245, 0.308 },
+			[4] = { 0.725, 0.700 },
+			[5] = { 0.190, 0.675 },
+			[6] = { 0.810, 0.300 },
+		}
+	else
+		fractions = {
+			[1] = { 0.210, 0.500 },
+			[2] = { 0.575, 0.500 },
+			[3] = { 0.245, 0.692 },
+			[4] = { 0.755, 0.317 },
+			[5] = { 0.165, 0.333 },
+			[6] = { 0.815, 0.675 },
+		}
+	end
+	local f = fractions[slot] or { 0.5, 0.5 }
+	return Vector2.new(layout.W * f[1], layout.H * f[2])
+end
+
+local function resetKickoff(room, kickoffTeam, countdownSeconds)
+	local layout = layoutOf(room)
+	local match = room.Match
+	if not match then return end
+
+	match.BallPos = Vector2.new(layout.W / 2, layout.H / 2)
+	match.BallVel = Vector2.new(0, 0)
+	match.BallRot = 0
+	match.CountdownEndsAt = workspace:GetServerTimeNow() + (countdownSeconds or 3)
+	match.PhaseEndsAt = 0
+	match.PendingWinnerTeam = nil
+	match.PendingWinnerReason = nil
+	match.BallWallTimer = 0
+	match.BallWallCheckTimer = 0
+	match.BallWallLastPos = match.BallPos
+	match.BallWallEscapeCooldown = 0
+	match.BallClusterTimer = 0
+	match.BallClusterCheckTimer = 0
+	match.BallClusterLastPos = match.BallPos
+	match.BallClusterEscapeCooldown = 0
+
+	for _, member in pairs(room.Members) do
+		member.Pos = formationPosition(room, member.Slot, kickoffTeam)
+		member.Vel = Vector2.new(0, 0)
+		member.Facing = (member.Team == "Blue") and 0 or math.pi
+		member.Input.Move = Vector2.new(0, 0)
+		member.Input.Sprint = false
+		member.Input.Charging = false
+		member.KickCooldown = 0.6
+	end
+
+	room.Status = "Countdown"
+end
+
+local function finishMatch(room, winnerTeam, reason)
+	local match = room.Match
+	if not match or room.Status == "Finished" then return end
+
+	room.Status = "Finished"
+	match.WinnerTeam = winnerTeam
+	match.WinnerReason = reason
+	for _, member in pairs(room.Members) do
+		member.Input.Move = Vector2.new(0, 0)
+		member.Input.Sprint = false
+		member.Input.Charging = false
+		member.Rematch = false
+	end
+
+	sendMatchEvent(room, {
+		Type = "Finished",
+		WinnerTeam = winnerTeam,
+		Reason = reason,
+		BlueScore = match.BlueScore,
+		RedScore = match.RedScore,
+		BlueShots = match.BlueShots,
+		RedShots = match.RedShots,
+	})
+	sendSnapshot(room, true)
+	broadcastRooms()
+end
+
+local function startMatch(room)
+	if memberCount(room) ~= room.MaxPlayers then
+		return false
+	end
+
+	room.Match = {
+		BallPos = Vector2.new(0, 0),
+		BallVel = Vector2.new(0, 0),
+		BallRot = 0,
+		BlueScore = 0,
+		RedScore = 0,
+		BlueShots = 0,
+		RedShots = 0,
+		TimeLeft = MATCH_TIME,
+		Overtime = false,
+		CountdownEndsAt = 0,
+		PhaseEndsAt = 0,
+		SnapshotTimer = 0,
+		SnapshotSeq = 0,
+		BallWallTimer = 0,
+		BallWallCheckTimer = 0,
+		BallWallLastPos = Vector2.new(0, 0),
+		BallWallEscapeCooldown = 0,
+		BallClusterTimer = 0,
+		BallClusterCheckTimer = 0,
+		BallClusterLastPos = Vector2.new(0, 0),
+		BallClusterEscapeCooldown = 0,
+	}
+
+	for _, member in pairs(room.Members) do
+		member.Rematch = false
+		member.Team = teamForSlot(member.Slot)
+	end
+
+	resetKickoff(room, "Blue", 3)
+	local publicRoom = serializeRoom(room)
+	for _, member in ipairs(membersList(room)) do
+		MatchEvent:FireClient(member.Player, {
+			Type = "MatchStarting",
+			Room = publicRoom,
+			LocalSlot = member.Slot,
+			LocalTeam = member.Team,
+			CountdownEndsAt = room.Match.CountdownEndsAt,
+		})
+	end
+	sendSnapshot(room, true)
+	broadcastRooms()
+	return true
+end
+
+local function handleGoal(room, scorerTeam)
+	local match = room.Match
+	if not match or room.Status ~= "Playing" then return end
+
+	if scorerTeam == "Blue" then
+		match.BlueScore = match.BlueScore + 1
+	else
+		match.RedScore = match.RedScore + 1
+	end
+
+	room.Status = "Goal"
+	match.PhaseEndsAt = workspace:GetServerTimeNow() + 1.7
+	match.BallVel = match.BallVel * 0.15
+	for _, member in pairs(room.Members) do
+		member.Input.Move = Vector2.new(0, 0)
+		member.Input.Sprint = false
+		member.Input.Charging = false
+	end
+
+	local scorerScore = (scorerTeam == "Blue") and match.BlueScore or match.RedScore
+	if scorerScore >= room.WinGoals then
+		match.PendingWinnerTeam = scorerTeam
+		match.PendingWinnerReason = "Достигнуто " .. tostring(room.WinGoals) .. " голов"
+	elseif match.Overtime then
+		match.PendingWinnerTeam = scorerTeam
+		match.PendingWinnerReason = "Золотой гол"
+	end
+
+	sendMatchEvent(room, {
+		Type = "Goal",
+		ScorerTeam = scorerTeam,
+		BlueScore = match.BlueScore,
+		RedScore = match.RedScore,
+	})
+	sendSnapshot(room, false)
+	broadcastRooms()
+end
+
+--------------------------------------------------------------------------------
+-- Удаление игрока / комнаты
+--------------------------------------------------------------------------------
+local function destroyRoom(room, abortMessage, excludePlayer)
+	if abortMessage then
+		for _, member in ipairs(membersList(room)) do
+			if member.Player ~= excludePlayer then
+				MatchEvent:FireClient(member.Player, {
+					Type = "Aborted",
+					Message = abortMessage,
+				})
+			end
+		end
+	end
+
+	for _, member in pairs(room.Members) do
+		if roomByPlayer[member.Player] == room then
+			roomByPlayer[member.Player] = nil
+		end
+	end
+	roomsById[room.Id] = nil
+end
+
+local function removePlayerFromRoom(player, reason)
+	local room = roomByPlayer[player]
+	if not room then return false end
+
+	local leavingMember = findMember(room, player)
+	if leavingMember then
+		room.Members[player] = nil
+	end
+	roomByPlayer[player] = nil
+
+	if room.Status == "Countdown" or room.Status == "Playing" or room.Status == "Goal" then
+		destroyRoom(room, "Матч остановлен: игрок покинул комнату", player)
+		broadcastRooms()
+		return true
+	end
+
+	if room.Status == "Finished" then
+		-- Для честного реванша нужен полный состав. Если кто-то вышел,
+		-- старая комната закрывается, а остальные сразу могут создать новую.
+		destroyRoom(room, nil, nil)
+		broadcastRooms()
+		return true
+	end
+
+	if memberCount(room) <= 0 then
+		roomsById[room.Id] = nil
+	else
+		if room.Host == player then
+			local nextHost = membersList(room)[1]
+			room.Host = nextHost and nextHost.Player or nil
+		end
+		for _, member in pairs(room.Members) do
+			member.IsHost = member.Player == room.Host
+		end
+	end
+
+	broadcastRooms()
+	return true
+end
+
+--------------------------------------------------------------------------------
+-- Физика игроков
+--------------------------------------------------------------------------------
+local function stepPlayers(room, dt)
+	local layout = layoutOf(room)
+	for _, member in pairs(room.Members) do
+		member.KickCooldown = math.max(0, member.KickCooldown - dt)
+
+		local move = member.Input.Move or Vector2.new(0, 0)
+		if move.Magnitude > 1 then
+			move = unit2(move)
+		end
+
+		local maxSpeed = (member.Input.Sprint and PLAYER_SPRINT or PLAYER_SPEED) * layout.Scale
+		if member.Input.Charging then
+			maxSpeed = maxSpeed * 0.72
+		end
+
+		local desired = move * maxSpeed
+		local acceleration = 820 * layout.Scale
+		if desired.Magnitude < 1 then
+			acceleration = 980 * layout.Scale
+		elseif member.Vel.Magnitude > 20 * layout.Scale and member.Vel:Dot(desired) < 0 then
+			acceleration = 900 * layout.Scale
+		end
+
+		member.Vel = approachVelocity(member.Vel, desired, acceleration, dt)
+		if desired.Magnitude < 1 and member.Vel.Magnitude < 5 then
+			member.Vel = Vector2.new(0, 0)
+		end
+
+		member.Pos = member.Pos + member.Vel * dt
+		member.Pos, member.Vel = applyFieldClamp(room, member.Pos, member.Vel, CHIP_R)
+
+		if member.Vel.Magnitude > 15 then
+			local targetAngle = math.atan(member.Vel.Y, member.Vel.X)
+			member.Facing = lerpAngle(member.Facing, targetAngle, 1 - math.exp(-12 * dt))
+		end
+	end
+end
+
+local function resolveChipPair(room, a, b)
+	local diff = b.Pos - a.Pos
+	local dist = diff.Magnitude
+	local minDist = CHIP_R * 2
+	if dist >= minDist then return end
+
+	local normal
+	if dist > 0.001 then
+		normal = diff / dist
+	else
+		normal = unit2(b.Vel - a.Vel)
+		if normal.Magnitude < 0.01 then
+			normal = Vector2.new(1, 0)
+		end
+	end
+
+	local push = normal * ((minDist - dist) / 2)
+	a.Pos = a.Pos - push
+	b.Pos = b.Pos + push
+
+	local closingSpeed = (b.Vel - a.Vel):Dot(normal)
+	if closingSpeed < 0 then
+		a.Vel = a.Vel + normal * (closingSpeed / 2)
+		b.Vel = b.Vel - normal * (closingSpeed / 2)
+	end
+
+	a.Pos, a.Vel = applyFieldClamp(room, a.Pos, a.Vel, CHIP_R)
+	b.Pos, b.Vel = applyFieldClamp(room, b.Pos, b.Vel, CHIP_R)
+end
+
+local function resolveChipChip(room)
+	local list = membersList(room)
+	for _ = 1, 4 do
+		for i = 1, #list do
+			for j = i + 1, #list do
+				resolveChipPair(room, list[i], list[j])
+			end
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Физика мяча
+--------------------------------------------------------------------------------
+local function bounceBallOffNormal(room, normal, restitution, tangentKeep)
+	local match = room.Match
+	local normalSpeed = match.BallVel:Dot(normal)
+	if normalSpeed >= 0 then
+		return 0
+	end
+	local tangentVel = match.BallVel - normal * normalSpeed
+	match.BallVel = tangentVel * tangentKeep - normal * normalSpeed * restitution
+	return -normalSpeed
+end
+
+local function collideBallWithChip(room, member)
+	local match = room.Match
+	local layout = layoutOf(room)
+	local diff = match.BallPos - member.Pos
+	local dist = diff.Magnitude
+	local minDist = CHIP_R + BALL_R
+	if dist >= minDist then
+		return false
+	end
+
+	local normal
+	if dist > 0.001 then
+		normal = diff / dist
+	else
+		normal = unit2(match.BallVel - member.Vel)
+		if normal.Magnitude < 0.01 then
+			normal = unit2(member.Vel)
+		end
+		if normal.Magnitude < 0.01 then
+			normal = unit2(Vector2.new(layout.W / 2, layout.H / 2) - member.Pos)
+		end
+		if normal.Magnitude < 0.01 then
+			normal = Vector2.new(1, 0)
+		end
+	end
+
+	-- Коррекция делится: 74% мяч / 26% фишка, как в офлайн-решателе v1.8.
+	local penetration = minDist - dist
+	match.BallPos = match.BallPos + normal * (penetration * 0.74)
+	member.Pos = member.Pos - normal * (penetration * 0.26)
+	member.Pos, member.Vel = applyFieldClamp(room, member.Pos, member.Vel, CHIP_R)
+	keepBallInsideForSolver(room)
+
+	local relativeVel = match.BallVel - member.Vel
+	local relativeNormal = relativeVel:Dot(normal)
+	if relativeNormal < 0 then
+		local relativeTangent = relativeVel - normal * relativeNormal
+		local chipNormalSpeed = member.Vel:Dot(normal)
+		local restitution = (chipNormalSpeed > 35 * layout.Scale) and 0.16 or 0.38
+		match.BallVel = member.Vel + relativeTangent * 0.88 - normal * relativeNormal * restitution
+	end
+
+	return true
+end
+
+local function resolveBallChipOverlaps(room)
+	local match = room.Match
+	local minDist = CHIP_R + BALL_R
+	local list = membersList(room)
+
+	for _ = 1, 12 do
+		local anyHit = false
+		for _, member in ipairs(list) do
+			if collideBallWithChip(room, member) then
+				anyHit = true
+			end
+		end
+		if not anyHit then
+			return true
+		end
+		resolveChipChip(room)
+		keepBallInsideForSolver(room)
+		if ballChipClearance(room, match.BallPos) >= minDist - 0.05 then
+			return true
+		end
+	end
+
+	if ballChipClearance(room, match.BallPos) < minDist - 0.05 then
+		local layout = layoutOf(room)
+		local freePos = findFreeBallPosition(
+			room,
+			match.BallPos,
+			Vector2.new(layout.W / 2, layout.H / 2) - match.BallPos
+		)
+		if freePos then
+			match.BallPos = freePos
+			keepBallInsideForSolver(room)
+		end
+	end
+
+	return ballChipClearance(room, match.BallPos) >= minDist - 0.05
+end
+
+-- Swept circle-vs-circle: быстрый мяч не пролетает сквозь фишку между кадрами.
+local function moveBallSafely(room, dt)
+	local match = room.Match
+	local layout = layoutOf(room)
+	local minDist = CHIP_R + BALL_R
+	local timeLeft = dt
+	local list = membersList(room)
+
+	for _ = 1, 4 do
+		local move = match.BallVel * timeLeft
+		if move.Magnitude < 0.0001 then
+			return
+		end
+
+		local earliest = 2
+		local hitMember = nil
+		for _, member in ipairs(list) do
+			local rel = match.BallPos - member.Pos
+			local a = move:Dot(move)
+			if a > 0.000001 then
+				local b = 2 * rel:Dot(move)
+				local c = rel:Dot(rel) - minDist * minDist
+				local hitTime = nil
+				if c <= 0 then
+					local n0 = unit2(rel)
+					if n0.Magnitude > 0.01 and (match.BallVel - member.Vel):Dot(n0) < -0.01 then
+						hitTime = 0
+					end
+				else
+					local discriminant = b * b - 4 * a * c
+					if discriminant >= 0 then
+						hitTime = (-b - math.sqrt(discriminant)) / (2 * a)
+					end
+				end
+				if hitTime and hitTime >= 0 and hitTime <= 1 and hitTime < earliest then
+					earliest = hitTime
+					hitMember = member
+				end
+			end
+		end
+
+		if not hitMember then
+			match.BallPos = match.BallPos + move
+			return
+		end
+
+		match.BallPos = match.BallPos + move * earliest
+		local normal = unit2(match.BallPos - hitMember.Pos)
+		if normal.Magnitude < 0.01 then
+			normal = unit2(match.BallVel - hitMember.Vel)
+		end
+		if normal.Magnitude < 0.01 then
+			normal = Vector2.new(1, 0)
+		end
+
+		match.BallPos = hitMember.Pos + normal * (minDist + 0.04)
+		keepBallInsideForSolver(room)
+
+		local relativeVel = match.BallVel - hitMember.Vel
+		local relativeNormal = relativeVel:Dot(normal)
+		if relativeNormal < 0 then
+			local relativeTangent = relativeVel - normal * relativeNormal
+			local chipNormalSpeed = hitMember.Vel:Dot(normal)
+			local restitution = (chipNormalSpeed > 35 * layout.Scale) and 0.16 or 0.38
+			match.BallVel = hitMember.Vel + relativeTangent * 0.88 - normal * relativeNormal * restitution
+		end
+
+		resolveBallChipOverlaps(room)
+		timeLeft = timeLeft * (1 - earliest)
+		if timeLeft <= 0.00001 then
+			return
+		end
+	end
+end
+
+local function updateBallClusterEscape(room, dt)
+	local match = room.Match
+	local layout = layoutOf(room)
+	match.BallClusterEscapeCooldown = math.max(0, match.BallClusterEscapeCooldown - dt)
+
+	local contactCount = 0
+	local normalSum = Vector2.new(0, 0)
+	for _, member in pairs(room.Members) do
+		local diff = match.BallPos - member.Pos
+		local dist = diff.Magnitude
+		if dist <= CHIP_R + BALL_R + 24 then
+			contactCount = contactCount + 1
+			if dist > 0.01 then
+				normalSum = normalSum + diff / dist
+			end
+		end
+	end
+
+	local crowded = contactCount >= 2 and match.BallVel.Magnitude < 180 * layout.Scale
+	if crowded then
+		match.BallClusterCheckTimer = match.BallClusterCheckTimer + dt
+		if match.BallClusterCheckTimer >= 0.25 then
+			local moved = (match.BallPos - match.BallClusterLastPos).Magnitude
+			if moved < 15 then
+				match.BallClusterTimer = match.BallClusterTimer + match.BallClusterCheckTimer
+			else
+				match.BallClusterTimer = math.max(0, match.BallClusterTimer - match.BallClusterCheckTimer)
+			end
+			match.BallClusterLastPos = match.BallPos
+			match.BallClusterCheckTimer = 0
+		end
+	else
+		match.BallClusterTimer = math.max(0, match.BallClusterTimer - dt * 2)
+		match.BallClusterCheckTimer = 0
+		match.BallClusterLastPos = match.BallPos
+	end
+
+	local neededTime = (contactCount >= 3) and 0.48 or 0.72
+	if crowded and match.BallClusterEscapeCooldown <= 0 and match.BallClusterTimer >= neededTime then
+		local preferred = normalSum
+		if preferred.Magnitude < 0.25 then
+			preferred = Vector2.new(layout.W / 2, layout.H / 2) - match.BallPos
+		end
+		if match.BallVel.Magnitude > 25 * layout.Scale then
+			preferred = preferred + unit2(match.BallVel) * 0.45
+		end
+
+		local oldPos = match.BallPos
+		local freePos = findFreeBallPosition(room, oldPos, preferred)
+		if freePos then
+			local escapeDir = unit2(freePos - oldPos)
+			if escapeDir.Magnitude < 0.01 then
+				escapeDir = unit2(preferred)
+			end
+			if escapeDir.Magnitude < 0.01 then
+				escapeDir = unit2(Vector2.new(layout.W / 2, layout.H / 2) - oldPos)
+			end
+			match.BallPos = freePos
+			match.BallVel = escapeDir * (520 * layout.Scale)
+			match.BallClusterTimer = 0
+			match.BallClusterCheckTimer = 0
+			match.BallClusterLastPos = match.BallPos
+			match.BallClusterEscapeCooldown = 1.5
+			match.BallWallTimer = 0
+		end
+	end
+end
+
+local function updateDeadBallAtWall(room, dt)
+	local match = room.Match
+	local layout = layoutOf(room)
+	match.BallWallEscapeCooldown = math.max(0, match.BallWallEscapeCooldown - dt)
+
+	local nearestWall = math.min(
+		match.BallPos.X,
+		layout.W - match.BallPos.X,
+		match.BallPos.Y,
+		layout.H - match.BallPos.Y
+	)
+	local touchingWall = nearestWall <= BALL_R + 9
+
+	if touchingWall and match.BallVel.Magnitude < 150 * layout.Scale then
+		match.BallWallCheckTimer = match.BallWallCheckTimer + dt
+		if match.BallWallCheckTimer >= 0.30 then
+			local moved = (match.BallPos - match.BallWallLastPos).Magnitude
+			if moved < 16 * layout.Scale then
+				match.BallWallTimer = match.BallWallTimer + match.BallWallCheckTimer
+			else
+				match.BallWallTimer = math.max(0, match.BallWallTimer - match.BallWallCheckTimer * 1.5)
+			end
+			match.BallWallLastPos = match.BallPos
+			match.BallWallCheckTimer = 0
+		end
+	else
+		match.BallWallTimer = math.max(0, match.BallWallTimer - dt * 2)
+		match.BallWallCheckTimer = 0
+		match.BallWallLastPos = match.BallPos
+	end
+
+	if touchingWall and match.BallWallEscapeCooldown <= 0 and match.BallWallTimer >= 0.95 then
+		local centerDir = unit2(Vector2.new(layout.W / 2, layout.H / 2) - match.BallPos)
+		local freePos = findFreeBallPosition(room, match.BallPos, centerDir)
+		if freePos then
+			local escapeDir = unit2(freePos - match.BallPos)
+			if escapeDir.Magnitude < 0.01 then
+				escapeDir = centerDir
+			end
+			match.BallPos = freePos
+			match.BallVel = escapeDir * (455 * layout.Scale)
+			match.BallWallTimer = 0
+			match.BallWallCheckTimer = 0
+			match.BallWallLastPos = match.BallPos
+			match.BallWallEscapeCooldown = 1.6
+		end
+	end
+end
+
+local function collideBallCorner(room, sx, sy)
+	local match = room.Match
+	local layout = layoutOf(room)
+	local dx = (sx > 0) and match.BallPos.X or (layout.W - match.BallPos.X)
+	local dy = (sy > 0) and match.BallPos.Y or (layout.H - match.BallPos.Y)
+	if dx > 190 * layout.Scale or dy > 190 * layout.Scale then
+		return
+	end
+
+	local need = CORNER_CUT + BALL_R * math.sqrt(2)
+	local sum = dx + dy
+	if sum >= need then
+		return
+	end
+
+	local inward = Vector2.new(sx, sy) / math.sqrt(2)
+	match.BallPos = match.BallPos + inward * ((need - sum) / math.sqrt(2))
+	bounceBallOffNormal(room, inward, 0.64, 0.92)
+end
+
+-- Возвращает "Blue" / "Red", если в этом шаге забит гол.
+local function stepBall(room, dt)
+	local match = room.Match
+	local layout = layoutOf(room)
+
+	resolveBallChipOverlaps(room)
+	updateBallClusterEscape(room, dt)
+	updateDeadBallAtWall(room, dt)
+
+	local steps = clamp(math.ceil((match.BallVel.Magnitude * dt) / 7), 4, 12)
+	local goalY1, goalY2 = goalRange(room)
+	local posts = {
+		Vector2.new(0, goalY1),
+		Vector2.new(0, goalY2),
+		Vector2.new(layout.W, goalY1),
+		Vector2.new(layout.W, goalY2),
+	}
+
+	for _ = 1, steps do
+		local sdt = dt / steps
+		resolveBallChipOverlaps(room)
+		moveBallSafely(room, sdt)
+		resolveBallChipOverlaps(room)
+
+		match.BallVel = match.BallVel * math.pow(0.34, sdt)
+		if match.BallVel.Magnitude < 10 * layout.Scale then
+			match.BallVel = Vector2.new(0, 0)
+		end
+		if match.BallVel.Magnitude > 1100 * layout.Scale then
+			match.BallVel = unit2(match.BallVel) * (1100 * layout.Scale)
+		end
+		match.BallRot = (match.BallRot + match.BallVel.X * sdt * 1.8) % 360
+
+		-- Штанги
+		for _, post in ipairs(posts) do
+			local diff = match.BallPos - post
+			local dist = diff.Magnitude
+			local minDist = BALL_R + 7
+			if dist < minDist then
+				local normal = (dist > 0.001) and (diff / dist) or unit2(match.BallVel)
+				if normal.Magnitude < 0.01 then
+					normal = Vector2.new((post.X < layout.W / 2) and 1 or -1, 0)
+				end
+				match.BallPos = post + normal * minDist
+				bounceBallOffNormal(room, normal, 0.68, 0.92)
+			end
+		end
+
+		-- Верх / низ
+		if match.BallPos.Y < BALL_R then
+			match.BallPos = Vector2.new(match.BallPos.X, BALL_R)
+			match.BallVel = Vector2.new(match.BallVel.X * 0.94, math.abs(match.BallVel.Y) * 0.66)
+		elseif match.BallPos.Y > layout.H - BALL_R then
+			match.BallPos = Vector2.new(match.BallPos.X, layout.H - BALL_R)
+			match.BallVel = Vector2.new(match.BallVel.X * 0.94, -math.abs(match.BallVel.Y) * 0.66)
+		end
+
+		-- Скошенные углы
+		collideBallCorner(room, 1, 1)
+		collideBallCorner(room, -1, 1)
+		collideBallCorner(room, 1, -1)
+		collideBallCorner(room, -1, -1)
+
+		resolveBallChipOverlaps(room)
+
+		-- Левая сторона: гол красных или отскок от стенки.
+		if match.BallPos.X < BALL_R then
+			if inGoalMouth(room, match.BallPos.Y) then
+				if match.BallPos.X < -10 then
+					return "Red"
+				end
+			else
+				match.BallPos = Vector2.new(BALL_R, match.BallPos.Y)
+				match.BallVel = Vector2.new(math.abs(match.BallVel.X) * 0.72, match.BallVel.Y * 0.94)
+			end
+		end
+
+		-- Правая сторона: гол синих или отскок от стенки.
+		if match.BallPos.X > layout.W - BALL_R then
+			if inGoalMouth(room, match.BallPos.Y) then
+				if match.BallPos.X > layout.W + 10 then
+					return "Blue"
+				end
+			else
+				match.BallPos = Vector2.new(layout.W - BALL_R, match.BallPos.Y)
+				match.BallVel = Vector2.new(-math.abs(match.BallVel.X) * 0.72, match.BallVel.Y * 0.94)
+			end
+		end
+
+		resolveBallChipOverlaps(room)
+	end
+
+	resolveBallChipOverlaps(room)
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- Серверный удар
+--------------------------------------------------------------------------------
+local function attemptKick(room, member, rawPower)
+	local match = room.Match
+	if not match or room.Status ~= "Playing" then return end
+	if member.KickCooldown > 0 then return end
+
+	local layout = layoutOf(room)
+	local toBall = match.BallPos - member.Pos
+	local reach = CHIP_R + BALL_R + KICK_EXTRA_REACH * layout.Scale
+	if toBall.Magnitude > reach then
+		return
+	end
+
+	-- Только физическая линия контакта. Клиент присылает СИЛУ, не направление.
+	local dir = unit2(toBall)
+	if dir.Magnitude < 0.01 then
+		dir = unit2(member.Vel)
+	end
+	if dir.Magnitude < 0.01 then
+		dir = (member.Team == "Blue") and Vector2.new(1, 0) or Vector2.new(-1, 0)
+	end
+
+	match.BallPos = member.Pos + dir * (CHIP_R + BALL_R)
+	keepBallInsideForSolver(room)
+
+	local p = clamp(math.max(rawPower or 0, 0.06), 0, 1)
+	local effective = math.pow(p, 1.28)
+	local speed = (150 + effective * 850) * layout.Scale
+	local approachSpeed = math.max(0, member.Vel:Dot(dir))
+	speed = math.min(speed + approachSpeed * (0.08 + effective * 0.22), 1120 * layout.Scale)
+
+	local oldNormalSpeed = match.BallVel:Dot(dir)
+	local tangentVel = match.BallVel - dir * oldNormalSpeed
+	local outgoingNormal = math.max(speed, oldNormalSpeed * 0.38)
+	match.BallVel = dir * outgoingNormal + tangentVel * 0.38
+	if match.BallVel.Magnitude > 1120 * layout.Scale then
+		match.BallVel = unit2(match.BallVel) * (1120 * layout.Scale)
+	end
+
+	if member.Team == "Blue" then
+		match.BlueShots = match.BlueShots + 1
+	else
+		match.RedShots = match.RedShots + 1
+	end
+
+	member.KickCooldown = 0.18
+	sendMatchEvent(room, {
+		Type = "Kick",
+		Slot = member.Slot,
+		Team = member.Team,
+		Power = p,
+	})
+	sendSnapshot(room, false)
+end
+
+--------------------------------------------------------------------------------
+-- Главный серверный шаг комнаты
+--------------------------------------------------------------------------------
+local function stepRoom(room, dt)
+	local match = room.Match
+	if room.Status == "Waiting" or room.Status == "Finished" or not match then
+		return
+	end
+
+	match.SnapshotTimer = match.SnapshotTimer - dt
+	local now = workspace:GetServerTimeNow()
+
+	if room.Status == "Countdown" then
+		if now >= match.CountdownEndsAt then
+			room.Status = "Playing"
+			sendMatchEvent(room, { Type = "Playing" })
+			sendSnapshot(room, false)
+			broadcastRooms()
+		end
+	elseif room.Status == "Goal" then
+		if now >= match.PhaseEndsAt then
+			if match.PendingWinnerTeam then
+				finishMatch(room, match.PendingWinnerTeam, match.PendingWinnerReason)
+				return
+			end
+
+			-- мяч вводит команда, которая пропустила гол.
+			local concedingTeam = match.LastScorerTeam == "Blue" and "Red" or "Blue"
+			resetKickoff(room, concedingTeam, 2)
+			sendMatchEvent(room, {
+				Type = "Kickoff",
+				CountdownEndsAt = match.CountdownEndsAt,
+			})
+			sendSnapshot(room, true)
+			broadcastRooms()
+		end
+	elseif room.Status == "Playing" then
+		stepPlayers(room, dt)
+		resolveChipChip(room)
+		local scorer = stepBall(room, dt)
+		if scorer then
+			match.LastScorerTeam = scorer
+			handleGoal(room, scorer)
+			return
+		end
+
+		if not match.Overtime then
+			match.TimeLeft = math.max(0, match.TimeLeft - dt)
+			if match.TimeLeft <= 0 then
+				if match.BlueScore == match.RedScore then
+					match.Overtime = true
+					sendMatchEvent(room, { Type = "GoldenGoal" })
+					sendSnapshot(room, false)
+				else
+					local winner = (match.BlueScore > match.RedScore) and "Blue" or "Red"
+					finishMatch(room, winner, "Время матча вышло")
+					return
+				end
+			end
+		end
+	end
+
+	if match.SnapshotTimer <= 0 then
+		match.SnapshotTimer = SNAPSHOT_INTERVAL
+		sendSnapshot(room, false)
+	end
+end
+
+RunService.Heartbeat:Connect(function(rawDt)
+	local dt = math.min(rawDt, 0.05)
+	local activeRooms = {}
+	for _, room in pairs(roomsById) do
+		table.insert(activeRooms, room)
+	end
+	for _, room in ipairs(activeRooms) do
+		if roomsById[room.Id] == room then
+			stepRoom(room, dt)
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- Ввод игроков
+--------------------------------------------------------------------------------
+MatchInput.OnServerEvent:Connect(function(player, data)
+	if type(data) ~= "table" then return end
+
+	local room = roomByPlayer[player]
+	local member = findMember(room, player)
+	if not room or not member or not room.Match then return end
+
+	if isFiniteNumber(data.MoveX) and isFiniteNumber(data.MoveY) then
+		local move = Vector2.new(
+			clamp(data.MoveX, -1, 1),
+			clamp(data.MoveY, -1, 1)
+		)
+		if move.Magnitude > 1 then
+			move = unit2(move)
+		end
+		member.Input.Move = move
+	end
+
+	if type(data.Sprint) == "boolean" then
+		member.Input.Sprint = data.Sprint
+	end
+	if type(data.Charging) == "boolean" then
+		member.Input.Charging = data.Charging
+	end
+
+	if isFiniteNumber(data.KickPower) then
+		local seq = isFiniteNumber(data.KickSeq) and math.floor(data.KickSeq) or -1
+		if seq ~= member.LastKickSeq then
+			member.LastKickSeq = seq
+			attemptKick(room, member, clamp(data.KickPower, 0, 1))
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- RemoteFunction комнат: Create / Join / Leave / List / Rematch
+--------------------------------------------------------------------------------
+local function roomResponse(player, ok, message)
+	local room = roomByPlayer[player]
+	return {
+		Ok = ok == true,
+		Message = message,
+		Rooms = serializeRooms(),
+		Room = room and serializeRoom(room) or nil,
+	}
+end
+
+RoomRF.OnServerInvoke = function(player, action, data)
+	if type(action) ~= "string" then
+		return roomResponse(player, false, "Неверный запрос комнаты")
+	end
+	if type(data) ~= "table" then
+		data = {}
+	end
+
+	-- Лёгкая защита от спама RemoteFunction.
+	local nowClock = os.clock()
+	local lastCall = lastRoomCallAt[player] or -10
+	if nowClock - lastCall < 0.15 and action ~= "List" and action ~= "Leave" then
+		return roomResponse(player, false, "Слишком быстро: подожди мгновение")
+	end
+	lastRoomCallAt[player] = nowClock
+
+	if action == "List" then
+		return roomResponse(player, true, nil)
+
+	elseif action == "Create" then
+		if roomByPlayer[player] then
+			return roomResponse(player, false, "Ты уже состоишь в комнате: сначала нажми «Выйти»")
+		end
+
+		local mode = type(data.Mode) == "string" and data.Mode or "1v1"
+		local layout = LAYOUTS[mode]
+		if not layout then
+			return roomResponse(player, false, "Неизвестный режим комнаты")
+		end
+
+		local winGoals = isFiniteNumber(data.WinGoals) and math.floor(data.WinGoals) or 3
+		if not WIN_GOAL_OPTIONS[winGoals] then
+			winGoals = 3
+		end
+
+		roomSequence = roomSequence + 1
+		local room = {
+			Id = "Room-" .. HttpService:GenerateGUID(false),
+			Host = player,
+			Mode = mode,
+			ModeLabel = layout.Label,
+			TeamSize = layout.TeamSize,
+			WinGoals = winGoals,
+			MaxPlayers = layout.MaxPlayers,
+			Status = "Waiting",
+			Members = {},
+			CreatedOrder = roomSequence,
+			Match = nil,
+		}
+
+		local member = makeMember(player, 1, true)
+		room.Members[player] = member
+		roomsById[room.Id] = room
+		roomByPlayer[player] = room
+		broadcastRooms()
+
+		return roomResponse(
+			player,
+			true,
+			"✅ Комната создана: " .. layout.Label .. " • победа до " .. tostring(winGoals) .. " голов"
+		)
+
+	elseif action == "Join" then
+		if roomByPlayer[player] then
+			return roomResponse(player, false, "Ты уже состоишь в комнате: сначала выйди из неё")
+		end
+
+		local roomId = type(data.RoomId) == "string" and data.RoomId or ""
+		local room = roomsById[roomId]
+		if not room then
+			return roomResponse(player, false, "Комната уже закрыта")
+		end
+		if room.Status ~= "Waiting" then
+			return roomResponse(player, false, "Матч в этой комнате уже начался")
+		end
+		if memberCount(room) >= room.MaxPlayers then
+			return roomResponse(player, false, "В комнате больше нет свободных мест")
+		end
+
+		local slot = firstFreeSlot(room)
+		if not slot then
+			return roomResponse(player, false, "В комнате больше нет свободных мест")
+		end
+
+		room.Members[player] = makeMember(player, slot, false)
+		roomByPlayer[player] = room
+
+		local message = "✅ Ты зашёл в комнату " .. room.ModeLabel
+		if memberCount(room) == room.MaxPlayers then
+			startMatch(room)
+			message = "⚽ Все игроки собрались — матч начинается!"
+		else
+			broadcastRooms()
+		end
+		return roomResponse(player, true, message)
+
+	elseif action == "Leave" then
+		local wasInRoom = removePlayerFromRoom(player, "Leave")
+		return roomResponse(
+			player,
+			wasInRoom,
+			wasInRoom and "Ты вышел из комнаты" or "Ты не состоишь в комнате"
+		)
+
+	elseif action == "Rematch" then
+		local room = roomByPlayer[player]
+		local member = findMember(room, player)
+		if not room or not member then
+			return roomResponse(player, false, "Комната для реванша уже закрыта")
+		end
+		if room.Status ~= "Finished" then
+			return roomResponse(player, false, "Реванш доступен только после матча")
+		end
+
+		member.Rematch = true
+		local votes = 0
+		for _, other in pairs(room.Members) do
+			if other.Rematch then
+				votes = votes + 1
+			end
+		end
+
+		if memberCount(room) == room.MaxPlayers and votes >= room.MaxPlayers then
+			startMatch(room)
+			return roomResponse(player, true, "🔁 Все согласились — реванш начинается!")
+		end
+
+		broadcastRooms()
+		return roomResponse(
+			player,
+			true,
+			"🔁 Голос за реванш принят: " .. tostring(votes) .. "/" .. tostring(room.MaxPlayers)
+		)
+	end
+
+	return roomResponse(player, false, "Неизвестное действие комнаты")
+end
+
+--------------------------------------------------------------------------------
+-- Выход игрока с сервера
+--------------------------------------------------------------------------------
+Players.PlayerRemoving:Connect(function(player)
+	lastRoomCallAt[player] = nil
+	removePlayerFromRoom(player, "Disconnected")
+end)
+
+-- Начальный список для тех, чей клиент подключился чуть раньше сервера комнат.
+task.defer(function()
+	broadcastRooms()
+end)
+
+print("[ROBALL] Онлайн-сервер комнат запущен: ReplicatedStorage/ROBALL_Online")

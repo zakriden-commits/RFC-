@@ -1,9 +1,20 @@
 --[[
 ================================================================================
-  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.8 (МЕНЮ + МАТЧИ 1×1, 2×2 И 3×3)
+  🌈 ROBALL — ЧАСТЬ 1, ВЕРСИЯ 1.9 (ОФФЛАЙН + ОНЛАЙН-КОМНАТЫ)
   Авторская сборка для Roblox Studio • Актуально на 2026 год
 
-  ЧТО НОВОГО В 1.8:
+  ЧТО НОВОГО В 1.9:
+  • Рядом с обычным каталогом появился раздел «🌐 ОНЛАЙН»: список комнат текущего
+    сервера Roblox, аватар и ник создателя, режим, счёт игроков и кнопка входа
+  • Комнату можно создать на 1×1, 2×2 или 3×3 и выбрать, до скольки голов играем:
+    1, 2, 3, 5, 7 или 10. Как только все места заняты, сервер сам запускает Матч
+  • Онлайн-Матч считает сервер: движение, мяч, удары, голы, таймер и счёт одинаковы
+    у всех участников. На фишках стоят настоящие ники и аватары игроков
+  • Для онлайна нужен второй файл ROBALL_Online_Server.txt — обычный Script
+    в ServerScriptService. Без него оффлайн работает, а вкладка онлайна честно
+    покажет, что серверная часть не найдена
+
+  ЧТО НОВОГО БЫЛО В 1.8:
   • ГЛАВНЫЙ ФИКС СКОПЛЕНИЯ: мяч больше не остаётся внутри фишек. Добавлены swept-коллизия
     (без пролёта сквозь круг), много-контактное выталкивание сразу от всех фишек,
     поиск свободной точки и автоматический вылет медленного мяча из давки
@@ -71,8 +82,9 @@
 ================================================================================
 
   ЧТО ВНУТРИ:
-  • Большое футбольное меню на весь экран
+  • Большое футбольное меню на весь экран: вкладки «ОФФЛАЙН» и «ОНЛАЙН»
   • Режимы 1 на 1, 2 на 2 и 3 на 3 + отдельные сложности соперников и ботов-напарников
+  • Онлайн-комнаты текущего сервера Roblox: создатель, аватар, ник, места и автозапуск
   • Полностью 2D-игра (НЕ на 3D-карте, всё рисуется интерфейсом)
   • Круглые футболисты с аватарами/портретами: команды 1×1, 2×2 или 3×3, мяч в центре поля
   • Удар на ЛКМ: мяч строго от центра твоей фишки через центр мяча; курсор на удар не влияет
@@ -82,17 +94,20 @@
   • Поддержка телефона: веди фишку пальцем по полю + кнопка «УДАР»
 
 --------------------------------------------------------------------------------
-  📥 КУДА ВСТАВЛЯТЬ (ОЧЕНЬ ПРОСТО, ВСЁ В ОДНО МЕСТО):
+  📥 КУДА ВСТАВЛЯТЬ (ДВА СКРИПТА — КЛИЕНТ + СЕРВЕР):
 --------------------------------------------------------------------------------
-  1) Открой свой проект в Roblox Studio (подойдёт пустая Baseplate).
-  2) Справа в Explorer найди папку  StarterGui
-  3) Наведи на неё мышь, нажми  [+]  → выбери  LocalScript
-  4) Откроется скрипт. УДАЛИ там всё (строку print("Hello world!")).
-  5) Вставь ВЕСЬ этот файл целиком (Ctrl+A → сюда Ctrl+V).
-  6) Нажми Play (▶) сверху. Готово!
+  ЭТОТ файл (клиент):
+  1) Открой проект в Roblox Studio (подойдёт пустая Baseplate).
+  2) Explorer → StarterGui → открой тот же LocalScript, что и раньше.
+  3) Удали в нём весь старый код и вставь ВЕСЬ этот файл целиком.
 
-  ⚠️ Больше НИЧЕГО создавать не надо: ни карту, ни детали, ни другие скрипты.
-     Скрипт сам строит меню, поле, фишки и мяч. Один LocalScript — вся игра.
+  Файл ROBALL_Online_Server.txt (сервер онлайна):
+  4) Explorer → ServerScriptService → [+] → Script (НЕ LocalScript).
+  5) Удали в нём всё и вставь весь файл ROBALL_Online_Server.txt целиком.
+  6) Нажми Play. RemoteEvent-ы сервер создаст сам, вручную ничего делать не надо.
+
+  ⚠️ Один LocalScript физически не может создать комнаты, видимые другим
+     игрокам: список комнат и онлайн-физику обязан держать серверный Script.
 
 --------------------------------------------------------------------------------
   🎮 УПРАВЛЕНИЕ:
@@ -314,6 +329,51 @@ enemy2Actor.Priority = 1
 enemy3Actor.Priority = 2
 local extraActors = { allyActor, ally2Actor, enemy2Actor, enemy3Actor }
 
+-- Всё состояние онлайна — в одной таблице, чтобы не возвращать краш лимита
+-- локальных регистров Luau. Методы сюда добавит сетевой блок ближе к концу файла.
+local Net = {
+	Connected = false,
+	Bound = false,
+	InRoom = false,
+	InMatch = false,
+	MenuTab = "Offline",
+	Rooms = {},
+	Room = nil,
+	LocalSlot = 0,
+	LocalTeam = "Blue",
+	SelectedMode = "1v1",
+	SelectedWinGoals = 3,
+	WinGoals = SETTINGS.WIN_GOALS,
+	StatusText = "Подключение к онлайн-серверу...",
+	InputTimer = 0,
+	LastInputKey = "",
+	KickSeq = 0,
+	Targets = nil,
+	SnapshotState = "Menu",
+	CountdownEndsAt = 0,
+	WinnerTeam = nil,
+	WinnerReason = nil,
+	GoalToken = 0,
+}
+-- Позиция/скорость именно той фишки, которой управляет локальный игрок.
+-- Оффлайн это всегда синяя фишка №1; онлайн слот выдаёт сервер.
+Net.GetLocalState = function()
+	if not Net.InMatch or Net.LocalSlot == 1 then
+		return playerPos, playerVel
+	elseif Net.LocalSlot == 2 then
+		return botPos, botVel
+	elseif Net.LocalSlot == 3 then
+		return allyActor.Pos, allyActor.Vel
+	elseif Net.LocalSlot == 4 then
+		return enemy2Actor.Pos, enemy2Actor.Vel
+	elseif Net.LocalSlot == 5 then
+		return ally2Actor.Pos, ally2Actor.Vel
+	elseif Net.LocalSlot == 6 then
+		return enemy3Actor.Pos, enemy3Actor.Vel
+	end
+	return playerPos, playerVel
+end
+
 -- Запись последних секунд для повтора гола
 -- Состояние записи/показа повтора — одна таблица вместо 11 отдельных top-level local.
 local Replay = {
@@ -347,6 +407,8 @@ local UI = {
 	allyDiffButtons = {},
 	cameraButtons = {},
 	postFrames = {},
+	onlineModeButtons = {},
+	onlineGoalButtons = {},
 }
 
 --// Маленькие помощники \\--
@@ -891,8 +953,8 @@ do -- каталог настроек: панели, карточки и refresh
 local menuPanelShadow = create("Frame", {
 	Name = "PanelShadow",
 	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(0.506, 0.598),
-	Size = UDim2.fromScale(0.716, 0.676),
+	Position = UDim2.fromScale(0.506, 0.624),
+	Size = UDim2.fromScale(0.716, 0.622),
 	BackgroundColor3 = Color3.fromRGB(0, 0, 0),
 	BackgroundTransparency = 0.58,
 	BorderSizePixel = 0,
@@ -902,13 +964,15 @@ addCorner(menuPanelShadow, 0, 26)
 local menuPanel = create("Frame", {
 	Name = "Panel",
 	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(0.5, 0.590),
-	Size = UDim2.fromScale(0.72, 0.660),
+	Position = UDim2.fromScale(0.5, 0.618),
+	Size = UDim2.fromScale(0.72, 0.610),
 	BackgroundColor3 = COL.Panel,
 	BackgroundTransparency = 0.08,
 	BorderSizePixel = 0,
 	ZIndex = 5,
 }, UI.menuFrame)
+UI.offlinePanelShadow = menuPanelShadow
+UI.offlinePanel = menuPanel
 addCorner(menuPanel, 0, 26)
 addStroke(menuPanel, Color3.fromRGB(120, 220, 255), 2, 0.38)
 addGradient(menuPanel, Color3.fromRGB(29, 38, 78), Color3.fromRGB(4, 13, 26), 35)
@@ -1222,7 +1286,7 @@ makeText(UI.menuFrame, {
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.fromScale(0.99, 0.012),
 	Size = UDim2.fromScale(0.2, 0.035),
-	Text = "ЧАСТЬ 1 • v1.8",
+	Text = "ЧАСТЬ 1 • v1.9",
 	TextSize = 14,
 	TextColor3 = Color3.fromRGB(160, 175, 190),
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -1230,6 +1294,572 @@ makeText(UI.menuFrame, {
 })
 
 end -- каталог настроек
+
+do -- вкладки ОФФЛАЙН/ОНЛАЙН и каталог онлайн-комнат строятся один раз
+-- Верхняя навигация лобби. Оффлайн и онлайн занимают одну и ту же центральную
+-- зону по очереди, поэтому панели не налезают друг на друга даже на телефоне.
+UI.menuTabs = create("Frame", {
+	Name = "MenuTabs",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.278),
+	Size = UDim2.fromScale(0.46, 0.052),
+	BackgroundColor3 = Color3.fromRGB(6, 15, 27),
+	BackgroundTransparency = 0.10,
+	BorderSizePixel = 0,
+	ZIndex = 8,
+}, UI.menuFrame)
+addCorner(UI.menuTabs, 1, 0)
+addStroke(UI.menuTabs, Color3.fromRGB(140, 220, 255), 1, 0.45)
+addGradient(UI.menuTabs, Color3.fromRGB(28, 55, 82), Color3.fromRGB(5, 11, 22), 90)
+UI.offlineTabButton = makeButton(UI.menuTabs, {
+	Name = "OfflineTab",
+	AnchorPoint = Vector2.new(0, 0.5),
+	Position = UDim2.fromScale(0.008, 0.5),
+	Size = UDim2.fromScale(0.484, 0.82),
+	BackgroundColor3 = COL.GreenBtn,
+	Text = "🎮  ОФФЛАЙН",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextScaled = true,
+	ZIndex = 9,
+})
+addCorner(UI.offlineTabButton, 1, 0)
+UI.onlineTabButton = makeButton(UI.menuTabs, {
+	Name = "OnlineTab",
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.fromScale(0.992, 0.5),
+	Size = UDim2.fromScale(0.484, 0.82),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "🌐  ОНЛАЙН",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextScaled = true,
+	ZIndex = 9,
+})
+addCorner(UI.onlineTabButton, 1, 0)
+
+UI.onlinePanel = create("Frame", {
+	Name = "OnlinePanel",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.618),
+	Size = UDim2.fromScale(0.72, 0.610),
+	BackgroundColor3 = COL.Panel,
+	BackgroundTransparency = 0.08,
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 5,
+}, UI.menuFrame)
+addCorner(UI.onlinePanel, 0, 26)
+addStroke(UI.onlinePanel, Color3.fromRGB(90, 225, 255), 2, 0.34)
+addGradient(UI.onlinePanel, Color3.fromRGB(20, 45, 82), Color3.fromRGB(4, 12, 28), 35)
+local onlinePanelAccent = create("Frame", {
+	Position = UDim2.fromScale(0.035, 0),
+	Size = UDim2.new(0.93, 0, 0, 5),
+	BackgroundColor3 = Color3.fromRGB(70, 190, 255),
+	BorderSizePixel = 0,
+	ZIndex = 6,
+}, UI.onlinePanel)
+addCorner(onlinePanelAccent, 1, 0)
+addGradient(onlinePanelAccent, Color3.fromRGB(80, 220, 255), Color3.fromRGB(170, 90, 255), 0)
+
+local function makeOnlineCard(name, x, y, w, h, title, accentColor)
+	local card = create("Frame", {
+		Name = name,
+		Position = UDim2.fromScale(x, y),
+		Size = UDim2.fromScale(w, h),
+		BackgroundColor3 = Color3.fromRGB(9, 25, 43),
+		BackgroundTransparency = 0.05,
+		BorderSizePixel = 0,
+		ZIndex = 6,
+	}, UI.onlinePanel)
+	addCorner(card, 0, 17)
+	addStroke(card, Color3.fromRGB(150, 220, 255), 1, 0.52)
+	addGradient(card, Color3.fromRGB(25, 58, 91), Color3.fromRGB(5, 13, 27), 35)
+	local accent = create("Frame", {
+		Position = UDim2.fromScale(0.04, 0),
+		Size = UDim2.new(0.92, 0, 0, 5),
+		BackgroundColor3 = accentColor,
+		BorderSizePixel = 0,
+		ZIndex = 7,
+	}, card)
+	addCorner(accent, 1, 0)
+	makeText(card, {
+		Position = UDim2.fromScale(0.05, 0.030),
+		Size = UDim2.fromScale(0.90, 0.085),
+		Text = title,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 16,
+		TextScaled = true,
+		TextColor3 = COL.White,
+		ZIndex = 7,
+	})
+	return card
+end
+
+local function makeOnlineOption(parent, name, x, y, w, h, text)
+	local btn = makeButton(parent, {
+		Name = name,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(x + w / 2, y + h / 2),
+		Size = UDim2.fromScale(w, h),
+		BackgroundColor3 = COL.GreyBtn,
+		Text = text,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 16,
+		TextScaled = true,
+		TextWrapped = true,
+		ZIndex = 8,
+	})
+	addCorner(btn, 0, 13)
+	local stroke = addStroke(btn, COL.White, 2, 0.74)
+	addGradient(btn, Color3.fromRGB(255, 255, 255), Color3.fromRGB(145, 165, 190), 90)
+	return { Button = btn, Stroke = stroke }
+end
+
+local function avatarImageFor(userId)
+	if type(userId) == "number" and userId > 0 then
+		return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(math.floor(userId)) .. "&w=420&h=420"
+	end
+	return ""
+end
+
+local function makeAvatar(parent, x, y, sizePx, userId, displayName, team)
+	local holder = create("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(x, 0, y, 0),
+		Size = UDim2.fromOffset(sizePx, sizePx),
+		BackgroundColor3 = (team == "Red") and COL.Bot or COL.Player,
+		BorderSizePixel = 0,
+		ZIndex = 8,
+	}, parent)
+	addCorner(holder, 1, 0)
+	addStroke(holder, COL.White, 2, 0.15)
+	local initial = "?"
+	if displayName and displayName ~= "" then
+		initial = string.sub(displayName, 1, 1)
+	end
+	makeText(holder, {
+		Size = UDim2.fromScale(1, 1),
+		Text = initial,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 22,
+		TextScaled = true,
+		TextColor3 = COL.White,
+		ZIndex = 8,
+	})
+	local image = avatarImageFor(userId)
+	if image ~= "" then
+		local img = create("ImageLabel", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Image = image,
+			ScaleType = Enum.ScaleType.Crop,
+			ZIndex = 9,
+		}, holder)
+		addCorner(img, 1, 0)
+	end
+	return holder
+end
+
+-- Левая полка: создание своей комнаты.
+local createCard = makeOnlineCard("CreateRoomCatalog", 0.035, 0.035, 0.35, 0.93, "➕  СОЗДАТЬ КОМНАТУ", Color3.fromRGB(70, 220, 255))
+UI.onlineModeButtons["1v1"] = makeOnlineOption(createCard, "OnlineMode_1v1", 0.07, 0.145, 0.86, 0.105, "1 НА 1  •  2 игрока")
+UI.onlineModeButtons["2v2"] = makeOnlineOption(createCard, "OnlineMode_2v2", 0.07, 0.270, 0.86, 0.105, "2 НА 2  •  4 игрока")
+UI.onlineModeButtons["3v3"] = makeOnlineOption(createCard, "OnlineMode_3v3", 0.07, 0.395, 0.86, 0.105, "3 НА 3  •  6 игроков")
+makeText(createCard, {
+	Position = UDim2.fromScale(0.07, 0.535),
+	Size = UDim2.fromScale(0.86, 0.055),
+	Text = "МАТЧ ДО ГОЛОВ:",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 14,
+	TextScaled = true,
+	TextColor3 = Color3.fromRGB(190, 215, 235),
+	ZIndex = 7,
+})
+local goalValues = { 1, 2, 3, 5, 7, 10 }
+for i, goals in ipairs(goalValues) do
+	local col = (i - 1) % 3
+	local row = math.floor((i - 1) / 3)
+	UI.onlineGoalButtons[goals] = makeOnlineOption(createCard, "OnlineGoals_" .. tostring(goals),
+		0.07 + col * 0.30, 0.610 + row * 0.105, 0.26, 0.085, tostring(goals))
+end
+UI.onlineCreateButton = makeButton(createCard, {
+	Name = "CreateOnlineRoom",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.845),
+	Size = UDim2.fromScale(0.86, 0.115),
+	BackgroundColor3 = Color3.fromRGB(0, 170, 255),
+	Text = "🌐  СОЗДАТЬ",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 22,
+	TextScaled = true,
+	ZIndex = 8,
+})
+addCorner(UI.onlineCreateButton, 0, 15)
+addStroke(UI.onlineCreateButton, COL.White, 2, 0.25)
+addGradient(UI.onlineCreateButton, Color3.fromRGB(255, 255, 255), Color3.fromRGB(90, 170, 255), 90)
+
+-- Правая верхняя полка: живые комнаты этого сервера Roblox.
+local roomsCard = makeOnlineCard("OnlineRoomsCatalog", 0.410, 0.035, 0.555, 0.550, "🌐  ОНЛАЙН — КОМНАТЫ СЕРВЕРА", Color3.fromRGB(80, 230, 180))
+for _, child in ipairs(roomsCard:GetChildren()) do
+	if child:IsA("TextLabel") then
+		-- Заголовок уходит влево, чтобы кнопка обновления справа не лежала на тексте.
+		child.Position = UDim2.fromScale(0.045, 0.030)
+		child.Size = UDim2.fromScale(0.69, 0.085)
+		child.TextXAlignment = Enum.TextXAlignment.Left
+		break
+	end
+end
+UI.onlineRefreshButton = makeButton(roomsCard, {
+	Name = "RefreshOnlineRooms",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.fromScale(0.975, 0.025),
+	Size = UDim2.fromScale(0.19, 0.085),
+	BackgroundColor3 = COL.GreyBtn,
+	Text = "↻",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextScaled = true,
+	ZIndex = 9,
+})
+addCorner(UI.onlineRefreshButton, 1, 0)
+UI.onlineRoomList = create("ScrollingFrame", {
+	Name = "RoomList",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.fromScale(0.5, 0.135),
+	Size = UDim2.fromScale(0.94, 0.825),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollBarThickness = 5,
+	ScrollBarImageColor3 = Color3.fromRGB(110, 200, 255),
+	ZIndex = 7,
+}, roomsCard)
+create("UIListLayout", {
+	Name = "RoomListLayout",
+	Padding = UDim.new(0, 8),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, UI.onlineRoomList)
+UI.onlineEmptyLabel = makeText(roomsCard, {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.55),
+	Size = UDim2.fromScale(0.86, 0.18),
+	Text = "Комнат пока нет\nСоздай первую слева 👈",
+	TextSize = 17,
+	TextScaled = true,
+	TextWrapped = true,
+	TextColor3 = Color3.fromRGB(170, 190, 210),
+	ZIndex = 8,
+})
+
+-- Правая нижняя полка: твоя текущая комната и все собравшиеся игроки.
+local currentCard = makeOnlineCard("CurrentRoomCatalog", 0.410, 0.610, 0.555, 0.355, "👥  ТВОЯ КОМНАТА", Color3.fromRGB(255, 200, 70))
+UI.onlineCurrentMeta = makeText(currentCard, {
+	Position = UDim2.fromScale(0.05, 0.120),
+	Size = UDim2.fromScale(0.90, 0.135),
+	Text = "Ты не в комнате",
+	TextSize = 14,
+	TextScaled = true,
+	TextWrapped = true,
+	TextColor3 = Color3.fromRGB(190, 210, 230),
+	ZIndex = 7,
+})
+UI.onlineCurrentSlots = create("Frame", {
+	Name = "CurrentRoomSlots",
+	Position = UDim2.fromScale(0.035, 0.275),
+	Size = UDim2.fromScale(0.93, 0.455),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 7,
+}, currentCard)
+UI.onlineStatusLabel = makeText(currentCard, {
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.fromScale(0.045, 0.965),
+	Size = UDim2.fromScale(0.66, 0.18),
+	Text = Net.StatusText,
+	TextSize = 12,
+	TextScaled = true,
+	TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextColor3 = Color3.fromRGB(150, 225, 255),
+	ZIndex = 7,
+})
+UI.onlineLeaveButton = makeButton(currentCard, {
+	Name = "LeaveOnlineRoom",
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.fromScale(0.965, 0.965),
+	Size = UDim2.fromScale(0.24, 0.18),
+	BackgroundColor3 = Color3.fromRGB(180, 55, 65),
+	Text = "ВЫЙТИ",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 15,
+	TextScaled = true,
+	Visible = false,
+	ZIndex = 8,
+})
+addCorner(UI.onlineLeaveButton, 0, 12)
+
+UI.setOnlineStatus = function(text)
+	Net.StatusText = text or ""
+	if UI.onlineStatusLabel then
+		UI.onlineStatusLabel.Text = Net.StatusText
+	end
+end
+
+UI.refreshOnlineCreateButtons = function()
+	for key, info in pairs(UI.onlineModeButtons) do
+		if key == Net.SelectedMode then
+			info.Button.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+			info.Stroke.Transparency = 0
+		else
+			info.Button.BackgroundColor3 = COL.GreyBtn
+			info.Stroke.Transparency = 0.74
+		end
+	end
+	for goals, info in pairs(UI.onlineGoalButtons) do
+		if goals == Net.SelectedWinGoals then
+			info.Button.BackgroundColor3 = Color3.fromRGB(255, 185, 35)
+			info.Button.TextColor3 = Color3.fromRGB(35, 30, 20)
+			info.Stroke.Transparency = 0
+		else
+			info.Button.BackgroundColor3 = COL.GreyBtn
+			info.Button.TextColor3 = COL.White
+			info.Stroke.Transparency = 0.74
+		end
+	end
+end
+
+local function localPlayerInRoom(room)
+	if not room or type(room.Players) ~= "table" then
+		return false
+	end
+	for _, info in ipairs(room.Players) do
+		if info.UserId == player.UserId then
+			return true
+		end
+	end
+	return false
+end
+
+local function roomModeText(room)
+	if room.ModeLabel then return room.ModeLabel end
+	if room.Mode == "3v3" then return "3×3" end
+	if room.Mode == "2v2" then return "2×2" end
+	return "1×1"
+end
+
+UI.renderCurrentRoom = function()
+	if not UI.onlineCurrentSlots then return end
+	for _, child in ipairs(UI.onlineCurrentSlots:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local room = Net.Room
+	if not room then
+		for _, candidate in ipairs(Net.Rooms or {}) do
+			if localPlayerInRoom(candidate) then
+				room = candidate
+				Net.Room = candidate
+				Net.InRoom = true
+				break
+			end
+		end
+	end
+	if not room then
+		Net.InRoom = false
+		UI.onlineCurrentMeta.Text = "Ты не в комнате • создай свою или нажми «Войти»"
+		UI.onlineLeaveButton.Visible = false
+		return
+	end
+	Net.InRoom = true
+	local statusText = "Ожидание игроков"
+	if room.Status == "Countdown" or room.Status == "Playing" or room.Status == "Goal" then
+		statusText = "Матч идёт"
+	elseif room.Status == "Finished" then
+		statusText = "Матч завершён"
+	end
+	UI.onlineCurrentMeta.Text = string.format("Комната %s • до %d голов • %d/%d • %s",
+		room.HostDisplayName or room.HostName or "игрока", room.WinGoals or 3,
+		room.PlayerCount or #(room.Players or {}), room.MaxPlayers or 2, statusText)
+	UI.onlineLeaveButton.Visible = true
+	local bySlot = {}
+	for _, info in ipairs(room.Players or {}) do
+		bySlot[info.Slot] = info
+	end
+	local maxPlayers = room.MaxPlayers or ((room.TeamSize or 1) * 2)
+	for slot = 1, maxPlayers do
+		local info = bySlot[slot]
+		local slotW = 0.94 / maxPlayers
+		local slotFrame = create("Frame", {
+			Position = UDim2.fromScale(0.03 + (slot - 1) * slotW, 0),
+			Size = UDim2.fromScale(slotW - 0.012, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			ZIndex = 7,
+		}, UI.onlineCurrentSlots)
+		local team = info and info.Team or ((slot % 2 == 1) and "Blue" or "Red")
+		makeAvatar(slotFrame, 0.5, 0.34, 38, info and info.UserId or 0,
+			info and (info.DisplayName or info.Name) or "?", team)
+		makeText(slotFrame, {
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.fromScale(0.5, 0.68),
+			Size = UDim2.fromScale(1, 0.30),
+			Text = info and (info.DisplayName or info.Name or "Игрок") or "Ожидание",
+			Font = Enum.Font.GothamBold,
+			TextSize = 11,
+			TextScaled = true,
+			TextWrapped = true,
+			TextColor3 = (team == "Red") and Color3.fromRGB(255, 170, 165) or Color3.fromRGB(165, 215, 255),
+			ZIndex = 8,
+		})
+	end
+end
+
+UI.renderOnlineRooms = function()
+	if not UI.onlineRoomList then return end
+	for _, child in ipairs(UI.onlineRoomList:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local rooms = Net.Rooms or {}
+	UI.onlineEmptyLabel.Visible = #rooms == 0
+	for i, room in ipairs(rooms) do
+		local mine = localPlayerInRoom(room)
+		local card = create("Frame", {
+			Name = "Room_" .. tostring(room.Id or i),
+			LayoutOrder = i,
+			Size = UDim2.new(1, -8, 0, 78),
+			BackgroundColor3 = mine and Color3.fromRGB(15, 55, 82) or Color3.fromRGB(10, 28, 46),
+			BackgroundTransparency = 0.05,
+			BorderSizePixel = 0,
+			ZIndex = 7,
+		}, UI.onlineRoomList)
+		addCorner(card, 0, 14)
+		addStroke(card, mine and Color3.fromRGB(80, 230, 255) or COL.White, 1, mine and 0.15 or 0.68)
+		addGradient(card, Color3.fromRGB(255, 255, 255), Color3.fromRGB(120, 150, 180), 90)
+		makeAvatar(card, 0, 0.5, 54, room.HostUserId, room.HostDisplayName or room.HostName, "Blue").Position = UDim2.new(0, 36, 0.5, 0)
+		makeText(card, {
+			Position = UDim2.new(0, 70, 0.07, 0),
+			Size = UDim2.new(0.58, -70, 0.34, 0),
+			Text = (room.HostDisplayName or room.HostName or "Игрок") .. ((room.HostName and room.HostName ~= room.HostDisplayName) and ("  @" .. room.HostName) or ""),
+			Font = Enum.Font.GothamBlack,
+			TextSize = 16,
+			TextScaled = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = COL.White,
+			ZIndex = 8,
+		})
+		local statusText = "🟢 Ожидание"
+		if room.Status == "Finished" then
+			statusText = "🏁 Завершена"
+		elseif room.Status ~= "Waiting" then
+			statusText = "🔴 Идёт Матч"
+		end
+		makeText(card, {
+			Position = UDim2.new(0, 70, 0.43, 0),
+			Size = UDim2.new(0.58, -70, 0.48, 0),
+			Text = string.format("%s • до %d голов • 👥 %d/%d\n%s", roomModeText(room), room.WinGoals or 3,
+				room.PlayerCount or #(room.Players or {}), room.MaxPlayers or 2, statusText),
+			TextSize = 13,
+			TextScaled = true,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextColor3 = Color3.fromRGB(190, 215, 235),
+			ZIndex = 8,
+		})
+		local canJoin = (not mine) and room.Status == "Waiting" and (room.PlayerCount or 0) < (room.MaxPlayers or 2)
+		local joinText = "Войти"
+		if mine then
+			joinText = "Вы здесь"
+		elseif room.Status ~= "Waiting" then
+			joinText = "Идёт Матч"
+		elseif not canJoin then
+			joinText = "Полная"
+		end
+		local joinButton = makeButton(card, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.fromScale(0.975, 0.5),
+			Size = UDim2.fromScale(0.22, 0.58),
+			BackgroundColor3 = canJoin and COL.GreenBtn or COL.GreyBtn,
+			Text = joinText,
+			Font = Enum.Font.GothamBlack,
+			TextSize = 15,
+			TextScaled = true,
+			Active = canJoin,
+			ZIndex = 9,
+		})
+		addCorner(joinButton, 0, 12)
+		if canJoin then
+			local roomId = room.Id
+			joinButton.MouseButton1Click:Connect(function()
+				if Net.JoinRoom then
+					Net.JoinRoom(roomId)
+				else
+					UI.setOnlineStatus("Онлайн-сервер ещё не подключился")
+				end
+			end)
+		end
+	end
+	UI.renderCurrentRoom()
+end
+
+UI.setMenuTab = function(tab)
+	Net.MenuTab = tab
+	if UI.offlinePanel then UI.offlinePanel.Visible = tab == "Offline" end
+	if UI.offlinePanelShadow then UI.offlinePanelShadow.Visible = true end
+	if UI.onlinePanel then UI.onlinePanel.Visible = tab == "Online" end
+	UI.offlineTabButton.BackgroundColor3 = (tab == "Offline") and COL.GreenBtn or COL.GreyBtn
+	UI.onlineTabButton.BackgroundColor3 = (tab == "Online") and Color3.fromRGB(0, 170, 255) or COL.GreyBtn
+	if tab == "Online" then
+		UI.refreshOnlineCreateButtons()
+		UI.renderOnlineRooms()
+		if Net.RefreshRooms then
+			Net.RefreshRooms()
+		end
+	end
+end
+
+for key, info in pairs(UI.onlineModeButtons) do
+	info.Button.MouseButton1Click:Connect(function()
+		Net.SelectedMode = key
+		UI.refreshOnlineCreateButtons()
+	end)
+end
+for goals, info in pairs(UI.onlineGoalButtons) do
+	info.Button.MouseButton1Click:Connect(function()
+		Net.SelectedWinGoals = goals
+		UI.refreshOnlineCreateButtons()
+	end)
+end
+UI.onlineCreateButton.MouseButton1Click:Connect(function()
+	if Net.CreateRoom then
+		Net.CreateRoom()
+	else
+		UI.setOnlineStatus("Серверная часть онлайна не найдена: нужен Script в ServerScriptService")
+	end
+end)
+UI.onlineRefreshButton.MouseButton1Click:Connect(function()
+	if Net.RefreshRooms then
+		Net.RefreshRooms()
+	end
+end)
+UI.onlineLeaveButton.MouseButton1Click:Connect(function()
+	if Net.LeaveRoom then
+		Net.LeaveRoom()
+	end
+end)
+UI.offlineTabButton.MouseButton1Click:Connect(function() UI.setMenuTab("Offline") end)
+UI.onlineTabButton.MouseButton1Click:Connect(function() UI.setMenuTab("Online") end)
+UI.refreshOnlineCreateButtons()
+UI.renderOnlineRooms()
+UI.setMenuTab("Offline")
+
+end -- онлайн-каталог
 
 --------------------------------------------------------------------------------
 --  ЭКРАН ИГРЫ
@@ -1689,19 +2319,19 @@ local function makeChip(options)
 	addDisc(body, "PortraitEyeR", 0.64, 0.52, 0.13, eyeColor, 0, 5)
 	end
 
-	if options.CustomId and options.CustomId ~= "" then
-		local img = create("ImageLabel", {
-			Name = options.PlayerAvatar and "PlayerAvatar" or "BotPhoto",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromScale(0.96, 0.96),
-			BackgroundTransparency = 1,
-			Image = options.CustomId,
-			ScaleType = Enum.ScaleType.Crop,
-			ZIndex = 6,
-		}, body)
-		addCorner(img, 1, 0)
-	end
+	-- ImageLabel создаём всегда: оффлайн здесь аватар/фото бота, онлайн сервер
+	-- подставит настоящий аватар игрока, занявшего этот слот.
+	local img = create("ImageLabel", {
+		Name = options.PlayerAvatar and "PlayerAvatar" or "BotPhoto",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.96, 0.96),
+		BackgroundTransparency = 1,
+		Image = options.CustomId or "",
+		ScaleType = Enum.ScaleType.Crop,
+		ZIndex = 6,
+	}, body)
+	addCorner(img, 1, 0)
 
 	-- Маленький маркер направления у самого края: фото не закрывает, а играть помогает.
 	local startAngle = options.InitialFacing or 0
@@ -1732,35 +2362,35 @@ local function makeChip(options)
 		TextStrokeTransparency = 0.30,
 		ZIndex = 10,
 	})
-	return chip, marker, nameLabel
+	return chip, marker, nameLabel, img
 end
-UI.playerChip, UI.playerDirMarker = makeChip({
+UI.playerChip, UI.playerDirMarker, UI.playerNameLabel, UI.playerAvatarImage = makeChip({
 	Name = "PlayerChip", Color = COL.Player, Label = "ВЫ",
 	MarkerColor = COL.Yellow, PlayerAvatar = true,
 	CustomId = (CUSTOM_FACE_IMAGES.PLAYER ~= "" and CUSTOM_FACE_IMAGES.PLAYER or PLAYER_AVATAR_IMAGE),
 	InitialFacing = 0,
 })
-UI.allyChip, UI.allyDirMarker = makeChip({
+UI.allyChip, UI.allyDirMarker, UI.allyNameLabel, UI.allyAvatarImage = makeChip({
 	Name = "AllyChip", Color = Color3.fromRGB(0, 170, 230), Label = "НАПАРНИК",
 	MarkerColor = COL.White, EyeColor = Color3.fromRGB(120, 240, 255),
 	CustomId = CUSTOM_FACE_IMAGES.ALLY, InitialFacing = 0,
 })
-UI.ally2Chip, UI.ally2DirMarker = makeChip({
+UI.ally2Chip, UI.ally2DirMarker, UI.ally2NameLabel, UI.ally2AvatarImage = makeChip({
 	Name = "Ally2Chip", Color = Color3.fromRGB(80, 115, 255), Label = "НАПАРНИК 2",
 	MarkerColor = COL.White, EyeColor = Color3.fromRGB(255, 230, 120),
 	CustomId = CUSTOM_FACE_IMAGES.ALLY2, InitialFacing = 0,
 })
-UI.botChip, UI.botDirMarker, UI.botNameLabel = makeChip({
+UI.botChip, UI.botDirMarker, UI.botNameLabel, UI.botAvatarImage = makeChip({
 	Name = "BotChip", Color = COL.Bot, Label = "БОТ",
 	MarkerColor = Color3.fromRGB(95, 240, 255), EyeColor = Color3.fromRGB(80, 230, 255),
 	CustomId = CUSTOM_FACE_IMAGES.BOT, InitialFacing = math.pi,
 })
-UI.enemy2Chip, UI.enemy2DirMarker = makeChip({
+UI.enemy2Chip, UI.enemy2DirMarker, UI.enemy2NameLabel, UI.enemy2AvatarImage = makeChip({
 	Name = "Enemy2Chip", Color = Color3.fromRGB(255, 105, 55), Label = "БОТ 2",
 	MarkerColor = COL.White, EyeColor = Color3.fromRGB(120, 255, 210),
 	CustomId = CUSTOM_FACE_IMAGES.BOT2, InitialFacing = math.pi,
 })
-UI.enemy3Chip, UI.enemy3DirMarker = makeChip({
+UI.enemy3Chip, UI.enemy3DirMarker, UI.enemy3NameLabel, UI.enemy3AvatarImage = makeChip({
 	Name = "Enemy3Chip", Color = Color3.fromRGB(215, 40, 95), Label = "БОТ 3",
 	MarkerColor = COL.White, EyeColor = Color3.fromRGB(255, 210, 90),
 	CustomId = CUSTOM_FACE_IMAGES.BOT3, InitialFacing = math.pi,
@@ -1769,6 +2399,31 @@ UI.allyChip.Visible = false
 UI.ally2Chip.Visible = false
 UI.enemy2Chip.Visible = false
 UI.enemy3Chip.Visible = false
+
+-- Слоты поля всегда одни и те же: 1 Синий-1, 2 Красный-1, 3 Синий-2,
+-- 4 Красный-2, 5 Синий-3, 6 Красный-3. Онлайн просто меняет подписи/аватары.
+UI.chipNameLabels = {
+	UI.playerNameLabel, UI.botNameLabel, UI.allyNameLabel,
+	UI.enemy2NameLabel, UI.ally2NameLabel, UI.enemy3NameLabel,
+}
+UI.chipAvatarImages = {
+	UI.playerAvatarImage, UI.botAvatarImage, UI.allyAvatarImage,
+	UI.enemy2AvatarImage, UI.ally2AvatarImage, UI.enemy3AvatarImage,
+}
+UI.setChipIdentity = function(slot, label, image)
+	local nameLabel = UI.chipNameLabels[slot]
+	local avatar = UI.chipAvatarImages[slot]
+	if nameLabel then nameLabel.Text = label or "" end
+	if avatar then avatar.Image = image or "" end
+end
+UI.resetChipIdentities = function()
+	UI.setChipIdentity(1, "ВЫ", (CUSTOM_FACE_IMAGES.PLAYER ~= "" and CUSTOM_FACE_IMAGES.PLAYER or PLAYER_AVATAR_IMAGE))
+	UI.setChipIdentity(2, "БОТ", CUSTOM_FACE_IMAGES.BOT)
+	UI.setChipIdentity(3, "НАПАРНИК", CUSTOM_FACE_IMAGES.ALLY)
+	UI.setChipIdentity(4, "БОТ 2", CUSTOM_FACE_IMAGES.BOT2)
+	UI.setChipIdentity(5, "НАПАРНИК 2", CUSTOM_FACE_IMAGES.ALLY2)
+	UI.setChipIdentity(6, "БОТ 3", CUSTOM_FACE_IMAGES.BOT3)
+end
 
 -- Объёмный мяч: тень отдельно, вращающееся тело с панелями, швами и бликом
 UI.ballFrame = create("Frame", {
@@ -2208,7 +2863,7 @@ function showToast(text, duration)
 end
 
 function updateHUD()
-	if isTeamMode then
+	if Net.InMatch or isTeamMode then
 		UI.scoreLeftLabel.Text = "СИНИЕ  " .. tostring(playerScore)
 		UI.scoreRightLabel.Text = tostring(botScore) .. "  КРАСНЫЕ"
 	else
@@ -2337,7 +2992,8 @@ function resetKickoff(kickoffTeam)
 	if UI.enemy3Chip then UI.enemy3Chip.Visible = enemy3Actor.Active end
 
 	if cameraMode == "Close" then
-		cameraCenter = playerPos * 0.78 + ballPos * 0.22
+		local focusPos = Net.GetLocalState()
+		cameraCenter = focusPos * 0.78 + ballPos * 0.22
 	else
 		cameraCenter = Vector2.new(FIELD_W / 2, FIELD_H / 2)
 	end
@@ -2393,6 +3049,10 @@ function startCountdown()
 end
 
 function startMatch()
+	if Net.InRoom and Net.LeaveRoom then Net.LeaveRoom() end
+	Net.InMatch = false
+	Net.WinGoals = SETTINGS.WIN_GOALS
+	if UI.resetChipIdentities then UI.resetChipIdentities() end
 	matchToken = matchToken + 1
 	teamSize = (matchMode == "3v3" and 3) or (matchMode == "2v2" and 2) or 1
 	isTeamMode = teamSize > 1
@@ -2430,6 +3090,8 @@ function startMatch()
 end
 
 function goToMenu()
+	if Net.InMatch and Net.LeaveRoom then Net.LeaveRoom() end
+	Net.InMatch = false
 	matchToken = matchToken + 1
 	state = "Menu"
 	cancelCharge()
@@ -2447,6 +3109,10 @@ function goToMenu()
 end
 
 local function togglePause(forcePause)
+	if Net.InMatch then
+		if state == "Playing" then showToast("🌐 В онлайн-матче паузы нет", 1.4) end
+		return
+	end
 	if state == "Playing" or (forcePause and state == "Countdown") then
 		state = "Paused"
 		cancelCharge()
@@ -2465,7 +3131,13 @@ function finishMatch()
 	if UI.replayPanel then UI.replayPanel.Visible = false end
 	if UI.replaySkipButton then UI.replaySkipButton.Visible = false end
 
-	local playerWon = playerScore > botScore
+	local playerWon
+	if Net.InMatch then
+		playerWon = (Net.WinnerTeam == Net.LocalTeam)
+			or (Net.WinnerTeam == nil and ((Net.LocalTeam == "Blue" and playerScore > botScore) or (Net.LocalTeam == "Red" and botScore > playerScore)))
+	else
+		playerWon = playerScore > botScore
+	end
 	if playerWon then
 		UI.finishTitle.Text = "🏆 ПОБЕДА!"
 		UI.finishTitle.TextColor3 = COL.Yellow
@@ -2475,18 +3147,30 @@ function finishMatch()
 	end
 	UI.finishScore.Text = tostring(playerScore) .. "  :  " .. tostring(botScore)
 	local reason
-	if playerScore >= SETTINGS.WIN_GOALS or botScore >= SETTINGS.WIN_GOALS then
-		reason = "Матч до " .. tostring(SETTINGS.WIN_GOALS) .. " голов завершён досрочно."
+	local winGoalLimit = Net.InMatch and Net.WinGoals or SETTINGS.WIN_GOALS
+	if Net.InMatch and Net.WinnerReason then
+		reason = Net.WinnerReason
+	elseif playerScore >= winGoalLimit or botScore >= winGoalLimit then
+		reason = "Матч до " .. tostring(winGoalLimit) .. " голов завершён досрочно."
 	elseif overtime then
 		reason = "Всё решил ЗОЛОТОЙ ГОЛ в дополнительное время!"
 	else
 		reason = "Время матча вышло."
 	end
-	local shotText = isTeamMode
+	local shotText = (Net.InMatch or isTeamMode)
 		and ("\nУдары: СИНИЕ " .. tostring(shotsPlayer) .. " — " .. tostring(shotsBot) .. " КРАСНЫЕ")
 		or ("\nУдары: ВЫ " .. tostring(shotsPlayer) .. " — " .. tostring(shotsBot) .. " БОТ")
 	local diffText
-	if teamSize == 3 then
+	if Net.InMatch then
+		local votes = 0
+		local total = 0
+		if Net.Room and type(Net.Room.Players) == "table" then
+			total = #Net.Room.Players
+			for _, info in ipairs(Net.Room.Players) do if info.Rematch then votes = votes + 1 end end
+		end
+		diffText = "\n🌐 Онлайн • твоя команда: " .. ((Net.LocalTeam == "Red") and "КРАСНЫЕ" or "СИНИЕ")
+			.. " • Реванш: " .. tostring(votes) .. "/" .. tostring(math.max(total, 1))
+	elseif teamSize == 3 then
 		diffText = "\nСоперники: " .. currentDiff.Title .. " • Напарники: " .. currentAllyDiff.Title
 	elseif isTeamMode then
 		diffText = "\nСоперники: " .. currentDiff.Title .. " • Напарник: " .. currentAllyDiff.Title
@@ -2754,8 +3438,14 @@ end
 -- Подошёл снизу — вверх, сверху — вниз, по диагонали — по той же диагонали.
 -- Курсор, старая скорость мяча и боковая скорость фишки направление НЕ меняют.
 local function getContactDirection(isBot)
-	local chipPos = isBot and botPos or playerPos
-	local chipVel = isBot and botVel or playerVel
+	local chipPos, chipVel
+	if isBot then
+		chipPos, chipVel = botPos, botVel
+	elseif Net.InMatch then
+		chipPos, chipVel = Net.GetLocalState()
+	else
+		chipPos, chipVel = playerPos, playerVel
+	end
 	local dir = unit2(ballPos - chipPos)
 	if dir.Magnitude < 0.01 then
 		dir = unit2(chipVel)
@@ -2827,8 +3517,14 @@ end
 
 -- Удар по мячу только при касании кругов. Возвращает true, если удар произошёл.
 local function kickBall(isBot, power01)
-	local chipPos = isBot and botPos or playerPos
-	local chipVel = isBot and botVel or playerVel
+	local chipPos, chipVel
+	if isBot then
+		chipPos, chipVel = botPos, botVel
+	elseif Net.InMatch then
+		chipPos, chipVel = Net.GetLocalState()
+	else
+		chipPos, chipVel = playerPos, playerVel
+	end
 	local toBall = ballPos - chipPos
 	local reach = PLAYER_R + BALL_R + (isBot and BOT_KICK_REACH or PLAYER_KICK_REACH)
 	if toBall.Magnitude > reach then
@@ -2877,9 +3573,13 @@ local function releaseKick()
 	UI.powerBarBg.Visible = false
 	UI.aimLine.Visible = false
 
-	-- Если мяч не касается фишки, kickBall вернёт false и НИЧЕГО не произойдёт.
-	-- Рывка, телепорта скорости и движения персонажа от ЛКМ больше нет.
-	kickBall(false, power)
+	-- Онлайн удар считает сервер по настоящему контакту кругов.
+	-- Оффлайн kickBall вернёт false без касания; рывка персонажа нет нигде.
+	if Net.InMatch then
+		if Net.SendKick then Net.SendKick(power) end
+	else
+		kickBall(false, power)
+	end
 	chargePower = 0
 	chargeAimToGoal = false
 end
@@ -4217,7 +4917,8 @@ local function updateFieldCamera(dt)
 	local desired = Vector2.new(FIELD_W / 2, FIELD_H / 2)
 	if cameraMode == "Close" then
 		zoom = 1.7
-		desired = playerPos * 0.78 + ballPos * 0.22
+		local focusPos = Net.GetLocalState()
+		desired = focusPos * 0.78 + ballPos * 0.22
 		local visibleW = FIELD_W / zoom
 		local visibleH = FIELD_H / zoom
 		desired = Vector2.new(
@@ -4373,7 +5074,8 @@ local function chargeStep(dt)
 	-- Стрелка показывает ТОЧНУЮ линию центр фишки -> центр мяча.
 	local from
 	local dir
-	local inKickRange = (ballPos - playerPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH
+	local localChipPos = Net.GetLocalState()
+	local inKickRange = (ballPos - localChipPos).Magnitude <= PLAYER_R + BALL_R + PLAYER_KICK_REACH
 	if not inKickRange then
 		-- Мяч ещё не касается фишки: стрелки нет и рывка нет, шкала просто продолжает расти.
 		UI.aimLine.Visible = false
@@ -4389,6 +5091,487 @@ local function chargeStep(dt)
 end
 
 --================================================================================
+--  ОНЛАЙН-КЛИЕНТ: КОМНАТЫ, СИНХРОНИЗАЦИЯ И УПРАВЛЕНИЕ
+--================================================================================
+do -- сетевые Remote-ы и обработчики живут в Net, а не десятками top-level local
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local roomRF, roomUpdateRemote, matchInputRemote, matchEventRemote, matchSnapshotRemote
+
+local function setNetStatus(text)
+	if UI.setOnlineStatus then
+		UI.setOnlineStatus(text)
+	else
+		Net.StatusText = text or ""
+	end
+end
+
+local function avatarForUser(userId)
+	if type(userId) == "number" and userId > 0 then
+		return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(math.floor(userId)) .. "&w=420&h=420"
+	end
+	return ""
+end
+
+local function findOwnRoom(rooms)
+	if type(rooms) ~= "table" then return nil end
+	for _, room in ipairs(rooms) do
+		if type(room) == "table" and type(room.Players) == "table" then
+			for _, info in ipairs(room.Players) do
+				if info.UserId == player.UserId then
+					return room
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function callRoom(action, data)
+	if not roomRF then
+		setNetStatus("Серверная часть не найдена: нужен ROBALL_Online_Server.txt в ServerScriptService")
+		return nil
+	end
+	local ok, result = pcall(function()
+		return roomRF:InvokeServer(action, data or {})
+	end)
+	if not ok or type(result) ~= "table" then
+		setNetStatus("Онлайн-сервер не ответил. Проверь Script в ServerScriptService")
+		return nil
+	end
+	if type(result.Rooms) == "table" then
+		Net.Rooms = result.Rooms
+	end
+	if type(result.Room) == "table" then
+		Net.Room = result.Room
+		Net.InRoom = true
+	elseif action == "Leave" and result.Ok then
+		Net.Room = nil
+		Net.InRoom = false
+		Net.InMatch = false
+	elseif type(result.Rooms) == "table" then
+		local own = findOwnRoom(result.Rooms)
+		Net.Room = own
+		Net.InRoom = own ~= nil
+	end
+	if result.Message then
+		setNetStatus(result.Message)
+	end
+	if UI.renderOnlineRooms then
+		UI.renderOnlineRooms()
+	end
+	return result
+end
+
+Net.CreateRoom = function()
+	if Net.InMatch then return end
+	task.spawn(function()
+		callRoom("Create", { Mode = Net.SelectedMode, WinGoals = Net.SelectedWinGoals })
+	end)
+end
+
+Net.JoinRoom = function(roomId)
+	if Net.InMatch or type(roomId) ~= "string" then return end
+	task.spawn(function()
+		callRoom("Join", { RoomId = roomId })
+	end)
+end
+
+Net.LeaveRoom = function()
+	local wasInRoom = Net.InRoom or Net.Room ~= nil or Net.InMatch
+	Net.InMatch = false
+	Net.InRoom = false
+	Net.Room = nil
+	Net.Targets = nil
+	Net.LocalSlot = 0
+	if UI.renderOnlineRooms then UI.renderOnlineRooms() end
+	if wasInRoom and roomRF then
+		task.spawn(function() callRoom("Leave", {}) end)
+	end
+end
+
+Net.RefreshRooms = function()
+	if Net.InMatch then return end
+	task.spawn(function() callRoom("List", {}) end)
+end
+
+Net.Rematch = function()
+	task.spawn(function() callRoom("Rematch", {}) end)
+end
+
+Net.SendKick = function(power)
+	if not Net.InMatch or not matchInputRemote then return end
+	Net.KickSeq = Net.KickSeq + 1
+	matchInputRemote:FireServer({
+		KickPower = clamp(power or 0, 0, 1),
+		KickSeq = Net.KickSeq,
+	})
+end
+
+local function setSlotState(slot, pos, vel, facing)
+	if slot == 1 then
+		playerPos, playerVel = pos, vel
+		if facing then playerFacingAngle = facing end
+	elseif slot == 2 then
+		botPos, botVel = pos, vel
+		if facing then botFacingAngle = facing end
+	elseif slot == 3 then
+		allyActor.Pos, allyActor.Vel = pos, vel
+		if facing then allyActor.Facing = facing end
+	elseif slot == 4 then
+		enemy2Actor.Pos, enemy2Actor.Vel = pos, vel
+		if facing then enemy2Actor.Facing = facing end
+	elseif slot == 5 then
+		ally2Actor.Pos, ally2Actor.Vel = pos, vel
+		if facing then ally2Actor.Facing = facing end
+	elseif slot == 6 then
+		enemy3Actor.Pos, enemy3Actor.Vel = pos, vel
+		if facing then enemy3Actor.Facing = facing end
+	end
+end
+
+local function snapToTargets()
+	local targets = Net.Targets
+	if not targets then return end
+	if targets.Ball then
+		ballPos = targets.Ball
+		ballVel = targets.BallVel or Vector2.new(0, 0)
+		if targets.BallRot then ballRotation = targets.BallRot end
+	end
+	for slot, info in pairs(targets.Slots or {}) do
+		setSlotState(slot, info.Pos, info.Vel, info.Facing)
+	end
+end
+
+local function lerpSlot(slot, target, alpha)
+	if slot == 1 then
+		playerPos = playerPos:Lerp(target.Pos, alpha)
+		playerVel = target.Vel
+		if target.Facing then playerFacingAngle = lerpAngle(playerFacingAngle, target.Facing, alpha) end
+	elseif slot == 2 then
+		botPos = botPos:Lerp(target.Pos, alpha)
+		botVel = target.Vel
+		if target.Facing then botFacingAngle = lerpAngle(botFacingAngle, target.Facing, alpha) end
+	elseif slot == 3 then
+		allyActor.Pos = allyActor.Pos:Lerp(target.Pos, alpha)
+		allyActor.Vel = target.Vel
+		if target.Facing then allyActor.Facing = lerpAngle(allyActor.Facing, target.Facing, alpha) end
+	elseif slot == 4 then
+		enemy2Actor.Pos = enemy2Actor.Pos:Lerp(target.Pos, alpha)
+		enemy2Actor.Vel = target.Vel
+		if target.Facing then enemy2Actor.Facing = lerpAngle(enemy2Actor.Facing, target.Facing, alpha) end
+	elseif slot == 5 then
+		ally2Actor.Pos = ally2Actor.Pos:Lerp(target.Pos, alpha)
+		ally2Actor.Vel = target.Vel
+		if target.Facing then ally2Actor.Facing = lerpAngle(ally2Actor.Facing, target.Facing, alpha) end
+	elseif slot == 6 then
+		enemy3Actor.Pos = enemy3Actor.Pos:Lerp(target.Pos, alpha)
+		enemy3Actor.Vel = target.Vel
+		if target.Facing then enemy3Actor.Facing = lerpAngle(enemy3Actor.Facing, target.Facing, alpha) end
+	end
+end
+
+local function startOnlineMatch(data)
+	local room = data.Room
+	if type(room) ~= "table" then return end
+	Net.Room = room
+	Net.InRoom = true
+	Net.InMatch = true
+	Net.LocalSlot = tonumber(data.LocalSlot) or 1
+	Net.LocalTeam = data.LocalTeam or ((Net.LocalSlot % 2 == 1) and "Blue" or "Red")
+	Net.WinGoals = tonumber(room.WinGoals) or SETTINGS.WIN_GOALS
+	Net.WinnerTeam = nil
+	Net.WinnerReason = nil
+	Net.Targets = nil
+	Net.LastSnapshotSeq = 0
+	matchMode = room.Mode or "1v1"
+	teamSize = tonumber(room.TeamSize) or ((matchMode == "3v3" and 3) or (matchMode == "2v2" and 2) or 1)
+	isTeamMode = teamSize > 1
+	matchToken = matchToken + 1
+	keysDown = {}
+	cancelCharge()
+	applyDynamicField()
+	playerScore, botScore = 0, 0
+	shotsPlayer, shotsBot = 0, 0
+	timeLeft = tonumber(room.MatchTime) or SETTINGS.MATCH_TIME
+	overtime = false
+	if UI.resetChipIdentities then UI.resetChipIdentities() end
+	for _, info in ipairs(room.Players or {}) do
+		if UI.setChipIdentity and info.Slot then
+			UI.setChipIdentity(info.Slot, info.DisplayName or info.Name or "Игрок", avatarForUser(info.UserId))
+		end
+	end
+	local modeLabel = room.ModeLabel or ((teamSize == 3 and "3×3") or (teamSize == 2 and "2×2") or "1×1")
+	local teamLabel = (Net.LocalTeam == "Red") and "🔴 КРАСНЫЕ" or "🔵 СИНИЕ"
+	UI.diffBadgeLabel.Text = "🌐 ОНЛАЙН " .. modeLabel .. " • ДО " .. tostring(Net.WinGoals) .. " • ТЫ: " .. teamLabel
+	UI.menuFrame.Visible = false
+	UI.gameFrame.Visible = true
+	UI.pauseOverlay.Visible = false
+	UI.finishOverlay.Visible = false
+	UI.goalBanner.Visible = false
+	if UI.replayPanel then UI.replayPanel.Visible = false end
+	if UI.replaySkipButton then UI.replaySkipButton.Visible = false end
+	resetKickoff("player") -- сервер тоже начинает с розыгрыша синих
+	state = "Countdown"
+	Net.SnapshotState = "Countdown"
+	Net.CountdownEndsAt = tonumber(data.CountdownEndsAt) or (workspace:GetServerTimeNow() + 3)
+	UI.countdownLabel.Visible = true
+	UI.countdownLabel.Text = "3"
+	updateHUD()
+	showToast("🌐 Матч собран! Ты играешь за " .. (((Net.LocalTeam == "Red") and "КРАСНЫХ") or "СИНИХ"), 2)
+end
+
+local function applySnapshot(data)
+	if not Net.InMatch or type(data) ~= "table" then return end
+	-- UnreliableRemoteEvent не гарантирует порядок: старые пакеты игнорируем.
+	if type(data.Seq) == "number" then
+		if data.Seq <= (Net.LastSnapshotSeq or 0) then return end
+		Net.LastSnapshotSeq = data.Seq
+	end
+	Net.SnapshotState = data.State or Net.SnapshotState
+	if type(data.TimeLeft) == "number" then timeLeft = data.TimeLeft end
+	if type(data.BlueScore) == "number" then playerScore = math.floor(data.BlueScore) end
+	if type(data.RedScore) == "number" then botScore = math.floor(data.RedScore) end
+	if type(data.BlueShots) == "number" then shotsPlayer = math.floor(data.BlueShots) end
+	if type(data.RedShots) == "number" then shotsBot = math.floor(data.RedShots) end
+	overtime = data.Overtime == true
+	if type(data.CountdownEndsAt) == "number" then Net.CountdownEndsAt = data.CountdownEndsAt end
+	local targets = Net.Targets or { Slots = {} }
+	targets.Slots = targets.Slots or {}
+	if type(data.Ball) == "table" then
+		-- Компактный формат сервера: {X, Y, VX, VY, Rot}.
+		targets.Ball = Vector2.new(tonumber(data.Ball[1] or data.Ball.X) or ballPos.X, tonumber(data.Ball[2] or data.Ball.Y) or ballPos.Y)
+		targets.BallVel = Vector2.new(tonumber(data.Ball[3] or data.Ball.VX) or 0, tonumber(data.Ball[4] or data.Ball.VY) or 0)
+		targets.BallRot = tonumber(data.Ball[5] or data.Ball.Rot)
+	end
+	if type(data.Players) == "table" then
+		for slot, info in pairs(data.Players) do
+			local slotNumber = tonumber(slot)
+			if slotNumber and type(info) == "table" then
+				-- Компактный формат сервера: {X, Y, VX, VY, Facing}.
+				targets.Slots[slotNumber] = {
+					Pos = Vector2.new(tonumber(info[1] or info.X) or 0, tonumber(info[2] or info.Y) or 0),
+					Vel = Vector2.new(tonumber(info[3] or info.VX) or 0, tonumber(info[4] or info.VY) or 0),
+					Facing = tonumber(info[5] or info.F),
+				}
+			end
+		end
+	end
+	Net.Targets = targets
+	local shouldSnap = data.Snap == true or not Net.HasSnapshot
+	if not shouldSnap and targets.Ball and (targets.Ball - ballPos).Magnitude > 240 * FIELD_SCALE then
+		shouldSnap = true
+	end
+	Net.HasSnapshot = true
+	if shouldSnap then
+		snapToTargets()
+	end
+	if data.State == "Countdown" then
+		state = "Countdown"
+		UI.countdownLabel.Visible = true
+	elseif data.State == "Playing" then
+		state = "Playing"
+		UI.countdownLabel.Visible = false
+	elseif data.State == "Goal" then
+		state = "Goal"
+		UI.countdownLabel.Visible = false
+	elseif data.State == "Finished" then
+		state = "Finished"
+		UI.countdownLabel.Visible = false
+	end
+	updateHUD()
+end
+
+local function onMatchEvent(data)
+	if type(data) ~= "table" or type(data.Type) ~= "string" then return end
+	if data.Type == "MatchStarting" then
+		startOnlineMatch(data)
+	elseif data.Type == "Playing" then
+		if Net.InMatch then
+			state = "Playing"
+			UI.countdownLabel.Visible = false
+			playSfx(SFX.Click, 0.10, 1.35)
+		end
+	elseif data.Type == "Kickoff" then
+		if Net.InMatch then
+			state = "Countdown"
+			Net.CountdownEndsAt = tonumber(data.CountdownEndsAt) or (workspace:GetServerTimeNow() + 2)
+			UI.goalBanner.Visible = false
+			UI.countdownLabel.Visible = true
+		end
+	elseif data.Type == "Goal" then
+		if not Net.InMatch then return end
+		if type(data.BlueScore) == "number" then playerScore = math.floor(data.BlueScore) end
+		if type(data.RedScore) == "number" then botScore = math.floor(data.RedScore) end
+		state = "Goal"
+		cancelCharge()
+		local scorerTeam = data.ScorerTeam
+		UI.goalBanner.Text = (scorerTeam == Net.LocalTeam) and "⚽ ГОЛ ТВОЕЙ КОМАНДЫ!" or "⚽ ГОЛ СОПЕРНИКА..."
+		UI.goalBanner.TextColor3 = (scorerTeam == Net.LocalTeam) and COL.Yellow or Color3.fromRGB(255, 110, 100)
+		UI.goalBanner.Visible = true
+		UI.goalBannerScale.Scale = 0.4
+		TweenService:Create(UI.goalBannerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+		playSfx(SFX.Goal, 0.42, 1, 6)
+		spawnGoalFireworks((scorerTeam == "Blue") and "player" or "Bot")
+		Net.GoalToken = Net.GoalToken + 1
+		local myGoal = Net.GoalToken
+		task.delay(1.6, function()
+			if Net.GoalToken == myGoal then UI.goalBanner.Visible = false end
+		end)
+		updateHUD()
+	elseif data.Type == "Kick" then
+		local p = clamp(tonumber(data.Power) or 0.4, 0, 1)
+		playSfx(SFX.Kick, 0.18 + p * 0.18, 0.95 + p * 0.10)
+		pulseBall()
+	elseif data.Type == "GoldenGoal" then
+		overtime = true
+		showToast("⚡ ЗОЛОТОЙ ГОЛ! Следующий гол — победный!", 2.5)
+		updateHUD()
+	elseif data.Type == "Finished" then
+		if type(data.BlueScore) == "number" then playerScore = math.floor(data.BlueScore) end
+		if type(data.RedScore) == "number" then botScore = math.floor(data.RedScore) end
+		if type(data.BlueShots) == "number" then shotsPlayer = math.floor(data.BlueShots) end
+		if type(data.RedShots) == "number" then shotsBot = math.floor(data.RedShots) end
+		Net.WinnerTeam = data.WinnerTeam
+		Net.WinnerReason = data.Reason
+		Net.SnapshotState = "Finished"
+		finishMatch()
+	elseif data.Type == "Aborted" then
+		Net.InMatch = false
+		Net.Targets = nil
+		Net.HasSnapshot = false
+		Net.LastSnapshotSeq = 0
+		goToMenu()
+		if UI.setMenuTab then UI.setMenuTab("Online") end
+		setNetStatus(data.Message or "Матч остановлен: игрок вышел из комнаты")
+		Net.RefreshRooms()
+	elseif data.Type == "Toast" then
+		if data.Message then showToast(data.Message, 2) end
+	end
+end
+
+Net.Step = function(dt)
+	if not Net.InMatch then return end
+	local targets = Net.Targets
+	if targets then
+		local slotAlpha = 1 - math.exp(-18 * dt)
+		local localAlpha = 1 - math.exp(-8 * dt)
+		local ballAlpha = 1 - math.exp(-26 * dt)
+		for slot, info in pairs(targets.Slots or {}) do
+			-- Своя фишка ниже получит локальное предсказание движения, поэтому
+			-- к серверному снимку её тянем мягче: управление ощущается без задержки,
+			-- а сервер всё равно остаётся финальным источником правды.
+			lerpSlot(slot, info, (slot == Net.LocalSlot) and localAlpha or slotAlpha)
+		end
+		if targets.Ball then
+			ballPos = ballPos:Lerp(targets.Ball, ballAlpha)
+			ballVel = targets.BallVel or ballVel
+		end
+	end
+	if state == "Countdown" then
+		local remain = Net.CountdownEndsAt - workspace:GetServerTimeNow()
+		UI.countdownLabel.Visible = true
+		UI.countdownLabel.Text = (remain > 0.15) and tostring(math.ceil(remain)) or "⚽ ИГРА!"
+	elseif state == "Playing" then
+		UI.countdownLabel.Visible = false
+	end
+	-- Управление отправляем серверу максимум 20 раз/сек или сразу при изменении.
+	local move = Vector2.new(0, 0)
+	if state == "Playing" then
+		if touchActive then
+			local localPos = Net.GetLocalState()
+			local toTouch = touchFieldPos - localPos
+			if toTouch.Magnitude > 12 then
+				move = unit2(toTouch) * clamp(toTouch.Magnitude / (95 * FIELD_SCALE), 0.25, 1)
+			end
+		elseif not UserInputService:GetFocusedTextBox() then
+			if keysDown[Enum.KeyCode.W] or keysDown[Enum.KeyCode.Up] then move = move + Vector2.new(0, -1) end
+			if keysDown[Enum.KeyCode.S] or keysDown[Enum.KeyCode.Down] then move = move + Vector2.new(0, 1) end
+			if keysDown[Enum.KeyCode.A] or keysDown[Enum.KeyCode.Left] then move = move + Vector2.new(-1, 0) end
+			if keysDown[Enum.KeyCode.D] or keysDown[Enum.KeyCode.Right] then move = move + Vector2.new(1, 0) end
+			if move.Magnitude > 1 then move = unit2(move) end
+		end
+	end
+	local sprint = keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift]
+	local inputKey = string.format("%.2f|%.2f|%s|%s|%s", move.X, move.Y, tostring(sprint), tostring(isCharging), state)
+	Net.InputTimer = Net.InputTimer - dt
+	if matchInputRemote and (Net.InputTimer <= 0 or inputKey ~= Net.LastInputKey) then
+		matchInputRemote:FireServer({
+			MoveX = move.X,
+			MoveY = move.Y,
+			Sprint = sprint == true,
+			Charging = isCharging == true,
+		})
+		Net.InputTimer = 0.05
+		Net.LastInputKey = inputKey
+	end
+
+	-- Локальное предсказание ТОЛЬКО своей фишки. Оно повторяет серверную
+	-- формулу разгона/торможения и потом плавно сверяется со снимками.
+	if state == "Playing" and Net.LocalSlot >= 1 and Net.LocalSlot <= 6 then
+		local localPos, localVel = Net.GetLocalState()
+		local maxSpeed = ((sprint and SETTINGS.PLAYER_SPRINT) or SETTINGS.PLAYER_SPEED) * FIELD_SCALE
+		if isCharging then
+			maxSpeed = maxSpeed * 0.72
+		end
+		local desired = move * maxSpeed
+		local acceleration = 820 * FIELD_SCALE
+		if desired.Magnitude < 1 then
+			acceleration = 980 * FIELD_SCALE
+		elseif localVel.Magnitude > 20 * FIELD_SCALE and localVel:Dot(desired) < 0 then
+			acceleration = 900 * FIELD_SCALE
+		end
+		localVel = approachVelocity(localVel, desired, acceleration, dt)
+		if desired.Magnitude < 1 and localVel.Magnitude < 5 then
+			localVel = Vector2.new(0, 0)
+		end
+		localPos = localPos + localVel * dt
+		localPos, localVel = applyFieldClamp(localPos, localVel, PLAYER_R)
+		setSlotState(Net.LocalSlot, localPos, localVel, nil)
+	end
+end
+
+task.spawn(function()
+	local folder = ReplicatedStorage:WaitForChild("ROBALL_Online", 12)
+	if not folder then
+		setNetStatus("Серверная часть не найдена: вставь ROBALL_Online_Server.txt в ServerScriptService")
+		return
+	end
+	roomRF = folder:WaitForChild("RoomRF", 8)
+	roomUpdateRemote = folder:WaitForChild("RoomUpdate", 8)
+	matchInputRemote = folder:WaitForChild("MatchInput", 8)
+	matchEventRemote = folder:WaitForChild("MatchEvent", 8)
+	matchSnapshotRemote = folder:WaitForChild("MatchSnapshot", 8)
+	if not roomRF or not roomUpdateRemote or not matchInputRemote or not matchEventRemote or not matchSnapshotRemote then
+		setNetStatus("Онлайн-сервер найден, но RemoteEvent-ы созданы не полностью")
+		return
+	end
+	Net.Connected = true
+	Net.Bound = true
+	roomUpdateRemote.OnClientEvent:Connect(function(data)
+		if type(data) ~= "table" or type(data.Rooms) ~= "table" then return end
+		Net.Rooms = data.Rooms
+		local own = findOwnRoom(data.Rooms)
+		Net.Room = own
+		Net.InRoom = own ~= nil
+		if UI.renderOnlineRooms then UI.renderOnlineRooms() end
+		if Net.InMatch and state == "Finished" and own and own.Status == "Finished" then
+			finishMatch()
+		end
+	end)
+	matchEventRemote.OnClientEvent:Connect(onMatchEvent)
+	matchSnapshotRemote.OnClientEvent:Connect(applySnapshot)
+	setNetStatus("🟢 Онлайн подключён • комнаты видны игрокам этого сервера Roblox")
+	Net.RefreshRooms()
+	while true do
+		task.wait(5)
+		if UI.menuFrame.Visible and Net.MenuTab == "Online" and not Net.InMatch then
+			Net.RefreshRooms()
+		end
+	end
+end)
+end -- онлайн-клиент
+
+--================================================================================
 --  УПРАВЛЕНИЕ: клавиатура / мышь / тач
 --================================================================================
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -4402,7 +5585,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if input.KeyCode == Enum.KeyCode.Space and not gameProcessed then
 			if state == "Replay" then
 				endGoalReplay()
-			elseif state == "Goal" then
+			elseif state == "Goal" and not Net.InMatch then
 				Replay.replaySkipRequested = true
 			elseif state == "Playing" then
 				-- Быстрый физический удар с пробела (бонус во время игры)
@@ -4489,7 +5672,8 @@ UI.cameraGameButton.MouseButton1Click:Connect(function()
 	cameraMode = (cameraMode == "Full") and "Close" or "Full"
 	cancelCharge()
 	if cameraMode == "Close" then
-		cameraCenter = playerPos * 0.78 + ballPos * 0.22
+		local focusPos = Net.GetLocalState()
+		cameraCenter = focusPos * 0.78 + ballPos * 0.22
 	end
 	UI.refreshCameraButtons()
 	updateFieldCamera(1)
@@ -4510,6 +5694,7 @@ UI.resumeButton.MouseButton1Click:Connect(function()
 	end
 end)
 UI.restartButtonP.MouseButton1Click:Connect(function()
+	if Net.InMatch then return end
 	UI.pauseOverlay.Visible = false
 	startMatch()
 end)
@@ -4517,6 +5702,11 @@ UI.menuButtonP.MouseButton1Click:Connect(function()
 	goToMenu()
 end)
 UI.rematchButton.MouseButton1Click:Connect(function()
+	if Net.InMatch then
+		if Net.Rematch then Net.Rematch() end
+		showToast("🔁 Голос за реванш отправлен", 1.6)
+		return
+	end
 	UI.finishOverlay.Visible = false
 	startMatch()
 end)
@@ -4545,7 +5735,11 @@ RunService.RenderStepped:Connect(function(dt)
 		return
 	end
 
-	if state == "Playing" then
+	if Net.InMatch then
+		if Net.Step then Net.Step(dt) end
+		updateDirectionMarkers(dt)
+		if state == "Playing" then chargeStep(dt) end
+	elseif state == "Playing" then
 		playingStep(dt)
 		updateDirectionMarkers(dt)
 		recordReplayFrame(dt)
@@ -4569,4 +5763,4 @@ RunService.RenderStepped:Connect(function(dt)
 	render()
 end)
 
-print("[ROBALL] Часть 1 v1.8 загружена ✅ Лобби на экране. Выбери режим и жми «ИГРАТЬ»!")
+print("[ROBALL] Часть 1 v1.9 загружена ✅ Выбери «ОФФЛАЙН» или «ОНЛАЙН» в лобби!")
